@@ -1,0 +1,27 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# build outputs at any level (app/build contains APKs)
+build/
+
+# kotlin session caches
+.kotlin/
+
+# local artifacts that must never be published
+*.apk
+*.jks
+*.keystore
+credentials*.yaml

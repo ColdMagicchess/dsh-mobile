@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSH 远端 · 连接页样式稿</title>
+<style>
+  :root {
+    --ink: #0d0c22;
+    --muted: #9e9ea7;
+    --label: #6b6b76;
+    --fill: #f1eee6;
+    --accent: 14, 165, 233;          /* rgb of #0EA5E9 sky */
+    --border-focus: rgba(14, 165, 233, 0.4);
+    --glow: rgba(14, 165, 233, 0.1);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #faf7f1;
+    color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 48px 20px 80px;
+  }
+  .page { width: 100%; max-width: 420px; }
+  h1 { font-size: 26px; font-weight: 600; margin: 0; letter-spacing: .5px; }
+  h1 em { font-style: normal; color: rgb(var(--accent)); }
+  .sub { font-size: 12px; color: var(--muted); margin: 8px 0 36px; }
+  .label { font-size: 13px; color: var(--label); margin: 0 0 8px 2px; }
+  .field { margin-bottom: 22px; }
+
+  /* ===== 基准输入框（Uiverse alexruix，原样保留） ===== */
+  .group {
+    display: flex;
+    line-height: 28px;
+    align-items: center;
+    position: relative;
+    max-width: 190px;
+  }
+  .input {
+    width: 100%;
+    height: 40px;
+    line-height: 28px;
+    padding: 0 1rem;
+    padding-left: 2.5rem;
+    border: 2px solid transparent;
+    border-radius: 8px;
+    outline: none;
+    background-color: var(--fill);
+    color: var(--ink);
+    transition: .3s ease;
+    font-size: 14px;
+  }
+  .input::placeholder { color: var(--muted); }
+  .input:focus, .input:hover, .input.demo-focus {
+    outline: none;
+    border-color: var(--border-focus);
+    background-color: #fff;
+    box-shadow: 0 0 0 4px var(--glow);
+  }
+  .icon {
+    position: absolute;
+    left: 1rem;
+    fill: var(--muted);
+    width: 1rem;
+    height: 1rem;
+    pointer-events: none;
+  }
+  .input:focus ~ .icon, .input.demo-focus ~ .icon { fill: rgb(var(--accent)); }
+
+  /* 参考样例展示区 */
+  .ref {
+    background: #f0f0f1;
+    border-radius: 12px;
+    padding: 26px 24px;
+    display: flex;
+    gap: 36px;
+    align-items: flex-start;
+    margin-bottom: 44px;
+  }
+  .ref .cap { font-size: 11px; color: var(--muted); text-align: center; margin-top: 10px; }
+
+  /* ===== 同风格扩展 ===== */
+  textarea.input {
+    height: auto;
+    min-height: 88px;
+    line-height: 22px;
+    padding: 12px 1rem 12px 2.5rem;
+    resize: none;
+    font-family: inherit;
+  }
+
+  /* 分段选择 */
+  .seg {
+    display: flex;
+    background: var(--fill);
+    border-radius: 8px;
+    padding: 4px;
+    gap: 4px;
+    border: 2px solid transparent;
+    transition: .3s ease;
+  }
+  .seg:hover { border-color: var(--border-focus); box-shadow: 0 0 0 4px var(--glow); background: #fff; }
+  .seg button {
+    flex: 1;
+    height: 34px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: .25s ease;
+    font-family: inherit;
+  }
+  .seg button.on {
+    background: #fff;
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: 0 1px 5px rgba(13, 12, 34, .09);
+  }
+
+  /* 开关行 */
+  .switch-row { display: flex; align-items: center; gap: 12px; margin: 26px 2px 28px; cursor: pointer; user-select: none; }
+  .switch { width: 44px; height: 24px; border-radius: 12px; background: #e5e1d8; position: relative; transition: .3s ease; flex: none; }
+  .switch::after {
+    content: "";
+    position: absolute;
+    top: 3px; left: 3px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(13, 12, 34, .25);
+    transition: .3s cubic-bezier(.34, 1.56, .64, 1);
+  }
+  .switch.on { background: rgb(var(--accent)); }
+  .switch.on::after { left: 23px; }
+  .switch-row .t { font-size: 14px; }
+  .switch-row .d { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* 主按钮 */
+  .btn {
+    width: 100%;
+    height: 46px;
+    border: 2px solid transparent;
+    border-radius: 8px;
+    background: rgb(var(--accent));
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 6px;
+    cursor: pointer;
+    transition: .3s ease;
+    font-family: inherit;
+  }
+  .btn:hover { box-shadow: 0 0 0 5px var(--glow); filter: brightness(1.05); }
+  .btn:active { transform: scale(.985); }
+  .btn.off { background: var(--fill); color: var(--muted); cursor: not-allowed; box-shadow: none; filter: none; }
+
+  .hint { font-size: 11px; line-height: 19px; color: var(--muted); margin-top: 26px; }
+  .divider { border: none; border-top: 1px solid #ececef; margin: 40px 0 28px; }
+  .tag { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ① 你给的参考样例，原样复刻（左：聚焦 右：常态） -->
+  <div class="tag">▼ 参考样例复刻（左为聚焦态）</div>
+  <div class="ref">
+    <div>
+      <div class="group">
+        <input placeholder="Search" type="search" class="input demo-focus">
+        <svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><g><path d="M21.53 20.47l-3.66-3.66C19.195 15.24 20 13.214 20 11c0-4.97-4.03-9-9-9s-9 4.03-9 9 4.03 9 9 9c2.215 0 4.24-.804 5.808-2.13l3.66 3.66c.147.146.34.22.53.22s.385-.073.53-.22c.295-.293.295-.767.002-1.06zM3.5 11c0-4.135 3.365-7.5 7.5-7.5s7.5 3.365 7.5 7.5-3.365 7.5-7.5 7.5-7.5-3.365-7.5-7.5z"/></g></svg>
+      </div>
+      <div class="cap">聚焦</div>
+    </div>
+    <div>
+      <div class="group">
+        <input placeholder="Search" type="search" class="input">
+        <svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><g><path d="M21.53 20.47l-3.66-3.66C19.195 15.24 20 13.214 20 11c0-4.97-4.03-9-9-9s-9 4.03-9 9 4.03 9 9 9c2.215 0 4.24-.804 5.808-2.13l3.66 3.66c.147.146.34.22.53.22s.385-.073.53-.22c.295-.293.295-.767.002-1.06zM3.5 11c0-4.135 3.365-7.5 7.5-7.5s7.5 3.365 7.5 7.5-3.365 7.5-7.5 7.5-7.5-3.365-7.5-7.5z"/></g></svg>
+      </div>
+      <div class="cap">常态</div>
+    </div>
+  </div>
+
+  <!-- ② 连接页（同一设计语言） -->
+  <h1>DeepSeek Harness <em>远端</em></h1>
+  <div class="sub">连接到 DSH 宿主 · 配对一次长期有效</div>
+
+  <div class="field">
+    <p class="label">主机地址</p>
+    <div class="group" style="max-width:none">
+      <input class="input" placeholder="https://your-host.example.com:47030" value="https://your-host.example.com:47030">
+      <svg class="icon" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm7.93 9h-3.02a15.7 15.7 0 0 0-1.2-5.36A8.03 8.03 0 0 1 19.93 11zM12 4.04c.86 1.16 1.84 3.4 2.04 6.96H9.96c.2-3.56 1.18-5.8 2.04-6.96zM8.29 5.64A15.7 15.7 0 0 0 7.09 11H4.07a8.03 8.03 0 0 1 4.22-5.36zM4.07 13h3.02c.09 1.98.5 4 1.2 5.36A8.03 8.03 0 0 1 4.07 13zM12 19.96c-.86-1.16-1.84-3.4-2.04-6.96h4.08c-.2 3.56-1.18 5.8-2.04 6.96zm3.71-1.6A15.7 15.7 0 0 0 16.91 13h3.02a8.03 8.03 0 0 1-4.22 5.36z"/></svg>
+    </div>
+  </div>
+
+  <div class="field">
+    <div class="seg" id="seg">
+      <button class="on">配对链接</button>
+      <button>粘贴 Cookie</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <p class="label">配对链接（桌面端「远程访问」面板复制）</p>
+    <div class="group" style="max-width:none">
+      <textarea class="input" placeholder="https://…/?pair=… 或 ?token=…"></textarea>
+      <svg class="icon" style="top:14px" viewBox="0 0 24 24"><path d="M3.9 12a3.1 3.1 0 0 1 3.1-3.1h4V7H7a5 5 0 0 0 0 10h4v-1.9H7A3.1 3.1 0 0 1 3.9 12zM8 13h8v-2H8v2zm9-6h-4v1.9h4a3.1 3.1 0 0 1 0 6.2h-4V19h4a5 5 0 0 0 0-12z"/></svg>
+    </div>
+  </div>
+
+  <label class="switch-row" id="trustRow">
+    <span class="switch" id="trustSw"></span>
+    <span>
+      <div class="t">信任该主机证书</div>
+      <div class="d">樱花 frp 等自签 https 需开启</div>
+    </span>
+  </label>
+
+  <button class="btn" id="btn">连 接</button>
+
+  <p class="hint">配对链接一次性有效，过期或已使用请回桌面端重新复制。含 ?pair= 的链接走插件通道，含 ?token= 的启动链接走核心通道（支持切换模型）。</p>
+
+  <hr class="divider">
+  <p class="hint">交互说明：输入框悬停/聚焦 → 白底 + 天蓝描边 + 柔光圈（0.3s 过渡）；图标随聚焦变天蓝；分段选中为白色浮起块；开关开启填充天蓝；按钮悬停出现光圈、按下轻微回缩。</p>
+</div>
+
+<script>
+  const seg = document.getElementById("seg");
+  seg.querySelectorAll("button").forEach(b => b.onclick = () => {
+    seg.querySelectorAll("button").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+  });
+  const sw = document.getElementById("trustSw");
+  document.getElementById("trustRow").onclick = () => sw.classList.toggle("on");
+</script>
+</body>
+</html>
