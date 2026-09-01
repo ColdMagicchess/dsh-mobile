@@ -638,10 +638,9 @@ private fun AssistantBubble(m: ChatMessage) {
                 m.text
             }
             if (body.isNotBlank()) {
-                if (m.pending && !body.contains('$')) {
-                    // 含 LaTeX 的流式消息跳过打字机：45ms 的部分文本重解析会让每条
-                    // 公式反复"归零→渲染→撑开"（疯狂抽搐），且可能截断半截公式。
-                    // 宿主本身是增量流，直接渲染全文即可；纯文本仍保留打字机。
+                if (m.pending) {
+                    // 公式抽搐已由 MarkdownText 的 drawable 缓存根治（已见过的公式
+                    // 高度稳定），流式期间全程保留打字机节奏。
                     TypewriterMarkdown(body, pending = true, color = Flat.Ink)
                 } else {
                     MarkdownText(body, color = Flat.Ink)
