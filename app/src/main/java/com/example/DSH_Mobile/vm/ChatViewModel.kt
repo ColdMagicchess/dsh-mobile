@@ -151,6 +151,11 @@ class ChatViewModel : ViewModel() {
         _draftPreset.value = null
         openedSessionId = s.sessionId
         _current.value = s
+        // 顶部工作区跟随会话所属工作区（桌面端按挂载分组，cwd 即工作区路径）
+        s.cwd?.takeIf { it.isNotBlank() }?.let { cwd ->
+            _selectedWorkspace.value = cwd
+            selectedWorkspaceId = _workspaces.value.firstOrNull { it.path == cwd }?.workspaceId
+        }
         _error.value = null
         streamJob?.cancel()
         store.reset()
