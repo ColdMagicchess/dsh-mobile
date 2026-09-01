@@ -123,3 +123,50 @@ JDK 17 + Android SDK（local.properties 指向）。输出：`app/build/outputs/
 - `session/list` 的 cursor 目前宿主忽略（全量返回），大会话量时列表可能较长。
 - WS 断线期间的事件由 `session/inspect` 全量补齐（幂等，水位去重），长会话下流量偏大；后续可换 `session/page` 增量。
 - `agentPresets/select` 的 `agentId` 是 lookup 参数，要求会话在宿主侧处于 live 状态；宿主重启后未恢复的空白会话切换预设会报 lookup-not-found（重进会话即恢复）。插件 BFF 白名单只有 `agentPreset.list`：已有会话切换预设在插件通道不可用（提示走新建对话）。
+
+## 7. 调试与踩坑记录（AI 维护者 / 新维护者必读）
+
+### 7.1 环境事实
+
+- **开发机即宿主机**：DSH 桌面端监听 `127.0.0.1:43120`（frp 公网 47030 转发至此）；桌面端源码在
+  `D:\Deepseek Harness\DSH Desktop\resources\app.asar.unpacked`，**运行中的插件与 web 前端**在
+  `~/.dsh/profiles/node_modules`（改这里要重启桌面端生效）。
+- 仓库已是 git 仓库：`main` 分支，remote = `ColdMagicchess/dsh-mobile`，凭据在 Windows 凭据管理器（GCM）。
+- 宿主凭据/签名密钥在 `~/.dsh/.credentials.yaml`（**不要提交、不要外传**）；core 网关对本机也强制鉴权，
+  无本地旁路；本桌面版**没有** `?token=` 配对入口（全包检索 0 命中），手机配对只走插件 `?pair=`。
+
+### 7.2 调试手法（ADB 端到端自测，全程可无人值守）
+
+```bash
+adb logcat -d -s DshPreset              # 预设名单加载日志（channel/n/ids）
+adb shell screencap -p /sdcard/x.png    # 截图（PowerShell 的 `>` 重定向会损坏二进制，
+adb pull /sdcard/x.png out.png          #  必须走 shell+screencap+pull 组合）
+adb shell input tap X Y                 # 模拟点击，配合截图定位坐标
+adb shell input keyevent KEYCODE_WAKEUP # 熄屏时先唤醒（授权弹窗掉线用 adb reconnect offline）
+```
+
+查第三方库行为**直接读 Gradle 缓存里的 sources jar**（如
+`~/.gradle/caches/modules-2/files-2.1/io.noties.markwon/ext-latex/.../*-sources.jar`，
+复制成 .zip 再 Expand-Archive），不要靠猜。
+
+### 7.3 已踩过的坑
+
+- **LaTeX 不渲染**：markwon-ext-latex 的 `inlinesEnabled` 默认 **false**（单行 `$$…$$` 与 `$…$` 全部
+  原样显示）；块解析器还要求 `$$` **独占一行**。已通过 `MarkwonInlineParserPlugin` +
+  `inlinesEnabled(true)` + `normalizeMath()`（单个 `$…$` 归一为 `$$…$$`，已成对 `$$` 块先占位保护）解决，
+  见 `MarkdownText.kt`。注意 `JLatexMathPlugin.Builder.build()` 返回 **Config**，要用
+  `JLatexMathPlugin.create(config)` 包装。
+- **流式输出抽搐**：打字机每 45ms 全文重解析会让每条 LaTeX 公式反复"归零→渲染→撑开"，且会截断
+  半截公式。含 `$` 的流式消息必须跳过打字机直接渲染全文（`AssistantBubble`），纯文本才保留。
+- **自动跟随**：`nearBottom` 必须算"视口末端到列表末端剩余距离"（`last.offset+last.size-viewEnd`）。
+  老写法 `viewportEnd-last.size` 在长消息内部滚动时为负值被误判为贴底，导致每个 chunk 把视图拽到最底部。
+  跟随滚动用大偏移 `scrollToItem(lastIndex, 1_000_000)` 钉底——offset=0 会把长消息**顶部**弹进视口。
+- **打字机重放**：`displayLen` 初值必须取当前全文（LazyColumn 释放滑出视口的消息后，滑回来重新
+  进组合会从 0 重放整段）；含 `$` 的消息同理跳过打字机。
+- **会话分组**：桌面端按工作区**挂载**分组——`session/create` 只传 `cwd` 不会挂载（落到"未分组"），
+  必须传 `workspaceId`（与 `cwd` 互斥）。插件 `workspace.list` 的行里就有 `workspaceId`。
+- **插件通道能力边界 = BFF 白名单**（`MOBILE_ALLOWLIST`）：缺能力先给插件加透传（见 PLUGIN_PATCH.md），
+  别试图直连核心通道——本部署手机侧拿不到 core cookie。
+- **PS 5.1 坑**：`Get-Content -Raw` 的字符串带 PSPath 等隐藏属性，`ConvertTo-Json` 会把它们序列化进去，
+  改用 `[IO.File]::ReadAllText`；`Expand-Archive` 不认 `.jar` 后缀，先复制成 `.zip`；
+  `Invoke-WebRequest -SkipHttpErrorCheck` 参数不存在（用 try/catch 读 `$_.Exception.Response`）。
