@@ -51,6 +51,7 @@ class AppViewModel : ViewModel() {
                 client.cookieValue = s.cookie
                 client.cookieNameOverride = s.cookieName
                 client.channel = s.channel
+                client.deviceId = s.deviceId
                 client.setTrustInsecure(s.trustInsecure)
                 _state.update { it.copy(booting = false, host = s.host) }
                 val probe = runCatching { repo.listSessions() }
@@ -61,7 +62,7 @@ class AppViewModel : ViewModel() {
                     val cause = probe.exceptionOrNull()
                     val revoked = cause is DshApiException &&
                         (cause.httpStatus == 401 || cause.httpStatus == 403)
-                    if (revoked) settings.saveHostCookie(s.host, "", "", s.channel, s.trustInsecure)
+                    if (revoked) settings.saveHostCookie(s.host, "", "", s.channel, s.trustInsecure, "")
                     _state.update {
                         it.copy(
                             screen = Screen.CONNECT,
@@ -96,10 +97,11 @@ class AppViewModel : ViewModel() {
                 else client.adoptManualCookie(secret)
                 client.cookieValue = result.cookie
                 client.channel = result.channel
+                client.deviceId = result.deviceId
                 if (result.channel == "core") client.cookieNameOverride = result.cookieName
                 val probe = runCatching { repo.listSessions() }
                 if (probe.isFailure) throw (probe.exceptionOrNull() ?: IllegalStateException("probe failed"))
-                settings.saveHostCookie(host, result.cookie, result.cookieName, result.channel, trustInsecure)
+                settings.saveHostCookie(host, result.cookie, result.cookieName, result.channel, trustInsecure, result.deviceId)
                 _state.update {
                     it.copy(
                         busy = false,

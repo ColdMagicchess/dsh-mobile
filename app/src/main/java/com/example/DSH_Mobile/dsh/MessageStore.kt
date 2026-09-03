@@ -138,24 +138,24 @@ class MessageStore {
                 val delta = d.arr("texts").orEmpty()
                     .mapNotNull { it.asPrim()?.contentOrNull }
                     .joinToString("")
-                appendToInProgress(list, d.int("turn"), text = delta)
+                appendToInProgress(list, d.int("turn"), d.int("step"), text = delta)
             }
             "chunkrow/reasoning-chunks" -> {
                 val delta = d.arr("texts").orEmpty()
                     .mapNotNull { it.asPrim()?.contentOrNull }
                     .joinToString("")
-                appendToInProgress(list, d.int("turn"), reasoning = delta)
+                appendToInProgress(list, d.int("turn"), d.int("step"), reasoning = delta)
             }
             "chunkrow/tool-call-chunks" -> {
                 val callId = d.str("id") ?: return list
                 val name = d.str("name")
                 val args = d.arr("args").orEmpty().mapNotNull { it.asPrim()?.contentOrNull }.joinToString("")
-                ensureTool(list, d.int("turn"), ToolCallInfo(callId, name ?: "", args))
+                ensureTool(list, d.int("turn"), d.int("step"), ToolCallInfo(callId, name ?: "", args))
             }
             "tool/call" -> {
                 val callId = d.str("callId") ?: return list
                 val info = ToolCallInfo(callId, d.str("name") ?: "", d.str("arguments") ?: "")
-                ensureTool(list, d.int("turn"), info)
+                ensureTool(list, d.int("turn"), d.int("step"), info)
             }
             "tool/result" -> applyToolResult(list, d)
             "turn/end" -> settleTurn(list, d.int("turn"))
@@ -241,6 +241,7 @@ class MessageStore {
         val m = d.obj("message") ?: d
         val id = m.str("id") ?: return list
         val turn = d.int("turn")
+        val step = d.int("step")
         var text = ""
         var reasoning = ""
         var images = 0
@@ -252,14 +253,19 @@ class MessageStore {
                 "image" -> images++
                 "tool-call" -> {
                     val callId = bo.str("id") ?: ""
-                    ensureTool(list, turn, ToolCallInfo(callId, bo.str("name") ?: "", bo.str("arguments") ?: ""))
+                    ensureTool(list, turn, step, ToolCallInfo(callId, bo.str("name") ?: "", bo.str("arguments") ?: ""))
                 }
             }
         }
-        // Merge with a placeholder created by chunks for the same turn, and with
-        // an existing entry of the same id (in-place replacement).
-        val placeholder = turn?.let { t ->
-            list.firstOrNull { it.role == Role.ASSISTANT && it.pending && it.id.startsWith("pending-") && it.turn == t }
+        // Merge with a placeholder created by chunks for the same (turn, step),
+        // and with an existing entry of the same id (in-place replacement).
+        val placeholder = if (turn != null) {
+            list.firstOrNull {
+                it.role == Role.ASSISTANT && it.pending && it.id.startsWith("pending-") &&
+                    it.turn == turn && (step == null || it.step == null || it.step == step)
+            }
+        } else {
+            null
         }
         val existing = list.firstOrNull { it.id == id }
         val merged = ChatMessage(
@@ -273,6 +279,7 @@ class MessageStore {
             seq = e.seq,
             pending = true,
             turn = turn,
+            step = step,
         )
         // Host-side provider retries can persist the same step text twice under
         // different message ids (both copies may still be pending when applied,
@@ -292,11 +299,12 @@ class MessageStore {
         }
         var out = upsert(list, merged)
         if (placeholder != null && placeholder.id != id) out = out.filterNot { it.id == placeholder.id }
-        // Belt & braces: retire any other pending placeholder for this turn or
-        // carrying the identical text (chunkrow vs raw-chunk double coverage).
+        // Belt & braces: retire any other pending placeholder of this exact
+        // (turn, step) or carrying the identical text (chunkrow vs raw-chunk
+        // double coverage).
         out = out.filterNot {
             it.id != id && it.role == Role.ASSISTANT && it.pending && it.id.startsWith("pending-") &&
-                ((turn != null && it.turn == turn) ||
+                ((turn != null && it.turn == turn && (step == null || it.step == null || it.step == step)) ||
                     (it.text.isNotEmpty() && (it.text == merged.text || merged.text.startsWith(it.text))))
         }
         return out
@@ -304,22 +312,27 @@ class MessageStore {
 
     private fun applyAssistantChunk(list: List<ChatMessage>, d: JsonObject): List<ChatMessage> {
         val turn = d.int("turn")
+        val step = d.int("step")
         val c = d.obj("chunk") ?: return list
         return when (c.str("type")) {
-            "text-delta" -> appendToInProgress(list, turn, text = c.str("text") ?: "")
-            "reasoning-delta" -> appendToInProgress(list, turn, reasoning = c.str("text") ?: "")
+            "text-delta" -> appendToInProgress(list, turn, step, text = c.str("text") ?: "")
+            "reasoning-delta" -> appendToInProgress(list, turn, step, reasoning = c.str("text") ?: "")
             "tool-call-delta" -> {
                 val callId = c.str("id") ?: return list
-                ensureTool(list, turn, ToolCallInfo(callId, c.str("name") ?: "", c.str("argumentsDelta") ?: ""))
+                ensureTool(list, turn, step, ToolCallInfo(callId, c.str("name") ?: "", c.str("argumentsDelta") ?: ""))
             }
             else -> list
         }
     }
 
-    private fun targetIndex(list: List<ChatMessage>, turn: Int?): Int {
-        // Prefer the pending assistant message of the turn; else the last pending one.
+    private fun targetIndex(list: List<ChatMessage>, turn: Int?, step: Int?): Int {
+        // One bubble per (turn, step). A bubble with unknown step still matches
+        // so early placeholders never orphan, but a known different step never
+        // steals another step's streaming text.
         val idx = list.indexOfLast {
-            it.role == Role.ASSISTANT && it.pending && (turn == null || it.turn == turn || it.turn == null)
+            it.role == Role.ASSISTANT && it.pending &&
+                (turn == null || it.turn == turn || it.turn == null) &&
+                (step == null || it.step == null || it.step == step)
         }
         return idx
     }
@@ -327,21 +340,23 @@ class MessageStore {
     private fun appendToInProgress(
         list: List<ChatMessage>,
         turn: Int?,
+        step: Int? = null,
         text: String = "",
         reasoning: String = "",
     ): List<ChatMessage> {
         if (text.isEmpty() && reasoning.isEmpty()) return list
-        val idx = targetIndex(list, turn)
+        val idx = targetIndex(list, turn, step)
         if (idx >= 0) {
             val m = list[idx]
             val updated = m.copy(
                 text = m.text + text,
                 reasoning = m.reasoning + reasoning,
                 turn = m.turn ?: turn,
+                step = m.step ?: step,
             )
             return list.toMutableList().also { it[idx] = updated }
         }
-        val placeholderId = "pending-${turn ?: -1}-${list.size}"
+        val placeholderId = "pending-${turn ?: -1}-${step ?: -1}-${list.size}"
         return list + ChatMessage(
             id = placeholderId,
             role = Role.ASSISTANT,
@@ -349,11 +364,17 @@ class MessageStore {
             reasoning = reasoning,
             pending = true,
             turn = turn,
+            step = step,
         )
     }
 
-    private fun ensureTool(list: List<ChatMessage>, turn: Int?, info: ToolCallInfo): List<ChatMessage> {
-        val idx = targetIndex(list, turn)
+    private fun ensureTool(
+        list: List<ChatMessage>,
+        turn: Int?,
+        step: Int? = null,
+        info: ToolCallInfo,
+    ): List<ChatMessage> {
+        val idx = targetIndex(list, turn, step)
         if (idx >= 0) {
             val m = list[idx]
             val tools = m.tools.toMutableList()
@@ -367,16 +388,19 @@ class MessageStore {
             } else {
                 tools.add(info.copy(arguments = if (info.name.isEmpty()) info.arguments else info.arguments))
             }
-            return list.toMutableList().also { it[idx] = m.copy(tools = tools, turn = m.turn ?: turn) }
+            return list.toMutableList().also {
+                it[idx] = m.copy(tools = tools, turn = m.turn ?: turn, step = m.step ?: step)
+            }
         }
         // No assistant message yet: create a placeholder hosting the tool call.
-        val placeholderId = "pending-${turn ?: -1}-${list.size}"
+        val placeholderId = "pending-${turn ?: -1}-${step ?: -1}-${list.size}"
         return list + ChatMessage(
             id = placeholderId,
             role = Role.ASSISTANT,
             tools = listOf(info),
             pending = true,
             turn = turn,
+            step = step,
         )
     }
 

@@ -25,3 +25,11 @@ build/
 *.jks
 *.keystore
 credentials*.yaml
+
+# the companion dsh-web-all plugin is NOT part of this project
+plugin-src/
+dsh-web-*.zip
+.ver-check/
+
+# but the release APK is published in-repo by explicit decision
+!release/*.apk

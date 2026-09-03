@@ -14,9 +14,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okhttp3.sse.EventSource
-import okhttp3.sse.EventSourceListener
-import okhttp3.sse.EventSources
 import java.net.URL
 import java.net.URLDecoder
 import java.security.MessageDigest
@@ -28,16 +25,24 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.X509TrustManager
 
 /**
- * Transport for the DSH host. Two channels:
- *  - "core":   POST /api/<ns>/<method> (payload wrapped in {args:{...}}) + WS /api/remote.mux;
- *  - "plugin": POST /m/api/<dot.method> (raw business payload) + SSE /m/api/events.mux
- *              (the dsh-remote-web-ui plugin BFF, authenticated by the dsh_pair cookie).
+ * Transport for the DSH host. Two channels (dsh-web-all 0.3.12 contract):
+ *  - "core":   POST /api/<ns>/<method> (payload wrapped in {args:{...}}) + WS /api/remote.mux,
+ *              authenticated by the authority-bound dsh-auth cookie.
+ *  - "plugin": the remote-web-ui gated mirror — POST /remote/api/<ns>/<method> and
+ *              WS /remote/api/remote.mux, authenticated by the paired-device cookie
+ *              (dsh_pair) and, cookieless, by the device id (x-dsh-remote-device header
+ *              on HTTP, ?device= on the WS upgrade). The plugin proxies every call to
+ *              the loopback host API, so both channels share one RPC surface; only the
+ *              pairing-control / self-update / plugin-manager / desktop-launcher
+ *              prefixes stay physically local. The 0.3.6 /m/api BFF no longer exists.
  */
 class DshClient {
 
     @Volatile var host: String = ""
     @Volatile var cookieValue: String = ""
     @Volatile var cookieNameOverride: String = ""
+    /** Paired-device session id (0.3.12 accept body); the cookieless fallback credential. */
+    @Volatile var deviceId: String = ""
     @Volatile var channel: String = "core"
 
     @Volatile var trustInsecure: Boolean = false
@@ -114,7 +119,24 @@ class DshClient {
         return if (v.contains('=')) v else "${cookieName()}=$v"
     }
 
-    data class PairResult(val cookie: String, val channel: String, val cookieName: String)
+    /** HTTP prefix of the active channel: gated mirror (plugin) or direct host API (core). */
+    fun apiPrefix(): String = if (channel == "plugin") "/remote/api" else "/api"
+
+    /** Cookieless device credential headers (0.3.12 /remote gate accepts them like the cookie). */
+    private fun Request.Builder.channelAuth(): Request.Builder {
+        header("Cookie", cookieHeader())
+        if (channel == "plugin" && deviceId.isNotBlank()) {
+            header("x-dsh-remote-device", deviceId.trim())
+        }
+        return this
+    }
+
+    data class PairResult(
+        val cookie: String,
+        val channel: String,
+        val cookieName: String,
+        val deviceId: String = "",
+    )
 
     /**
      * Pair from pasted input. Auto-detects the format:
@@ -155,14 +177,26 @@ class DshClient {
             when {
                 resp.code == 404 -> throw DshApiException("pair-invalid", "配对链接无效或已过期，请在桌面端重新复制一条")
                 resp.code == 409 -> throw DshApiException("pair-used", "配对链接已被使用，请在桌面端重新复制一条")
+                resp.code == 429 -> throw DshApiException("pair-ratelimited", "尝试过于频繁，请半分钟后再试")
+                resp.code == 403 -> throw DshApiException("forbidden", "桌面端拒绝了配对：请确认主机地址与桌面端「远程访问」设置", resp.code)
                 !resp.isSuccessful -> throw DshApiException(null, "配对失败：HTTP ${resp.code}", resp.code)
             }
+            // 0.3.12 answers {ok:true, deviceId} and sets the paired-device cookie.
+            val bodyDevice = runCatching {
+                DSH_JSON.parseToJsonElement(resp.body?.string() ?: "").asObj()?.str("deviceId")
+            }.getOrNull().orEmpty()
             val setCookie = resp.headers("set-cookie").firstOrNull { it.trimStart().startsWith("dsh_pair") }
                 ?: resp.headers("set-cookie").firstOrNull()
-                ?: throw DshApiException("pair-no-cookie", "配对成功但响应中没有 cookie")
+            if (setCookie == null) {
+                if (bodyDevice.isNotBlank()) {
+                    // Some proxies strip Set-Cookie; the device id alone is a valid credential.
+                    return PairResult("dsh_pair=$bodyDevice", "plugin", "dsh_pair", bodyDevice)
+                }
+                throw DshApiException("pair-no-cookie", "配对成功但响应中没有 cookie")
+            }
             val name = setCookie.trim().substringBefore('=').trim()
             val value = setCookie.trim().substringAfter('=').substringBefore(';').trim()
-            return PairResult("$name=$value", "plugin", name)
+            return PairResult("$name=$value", "plugin", name, bodyDevice)
         }
     }
 
@@ -187,11 +221,11 @@ class DshClient {
         return PairResult(c, ch, name)
     }
 
-    // ---------------- core channel RPC ----------------
+    // ---------------- host RPC (both channels; plugin rides the /remote mirror) ----------------
 
     suspend fun rpc(endpoint: String, args: JsonObject = JsonObject(emptyMap())): JsonObject =
         withContext(Dispatchers.IO) {
-            val url = baseUrl() + "/api/" + endpoint
+            val url = baseUrl() + apiPrefix() + "/" + endpoint
             var methodUsed = endpoint
             var lastError: DshApiException? = null
             repeat(2) {
@@ -213,26 +247,63 @@ class DshClient {
             throw lastError ?: DshApiException(null, "rpc failed")
         }
 
-    // ---------------- plugin BFF RPC ----------------
+    /**
+     * Plain GET on the active channel prefix (0.3.12 plugin HTTP routes such as
+     * dsh-session-archive inventory ride the same /remote gate as the RPC surface).
+     * These routes answer raw JSON documents, not the SDK RPC envelope.
+     */
+    suspend fun getJson(path: String): JsonObject = withContext(Dispatchers.IO) {
+        val url = baseUrl() + apiPrefix() + "/" + path.trimStart('/')
+        val req = Request.Builder().url(url).channelAuth()
+            .header("Accept", "application/json")
+            .build()
+        executePlain(url, req)
+    }
 
-    suspend fun rpcBff(method: String, payload: JsonObject): JsonObject = withContext(Dispatchers.IO) {
-        val url = baseUrl() + "/m/api/" + method
-        val envelope = buildJsonObject {
-            put("type", "client-request")
-            put("rpcId", UUID.randomUUID().toString())
-            put("method", method)
-            put("payload", payload)
-        }.toString()
-        executeAndParse(url, envelope)
+    /** Plain POST with a JSON body on the active channel prefix; raw JSON response. */
+    suspend fun postJson(path: String, body: JsonObject): JsonObject = withContext(Dispatchers.IO) {
+        val url = baseUrl() + apiPrefix() + "/" + path.trimStart('/')
+        val req = Request.Builder().url(url).channelAuth()
+            .header("Accept", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        executePlain(url, req)
+    }
+
+    private fun executePlain(url: String, req: Request): JsonObject {
+        http.newCall(req).execute().use { resp ->
+            val text = resp.body?.string() ?: ""
+            if (!resp.isSuccessful) {
+                throw DshApiException(null, describeHttpFailure(resp.code, text, url), resp.code)
+            }
+            val o = runCatching { DSH_JSON.parseToJsonElement(text).asObj() }.getOrNull()
+                ?: throw DshApiException("bad-json", "unexpected response: ${text.take(200)}", resp.code)
+            return o
+        }
+    }
+
+    /** Human-readable HTTP failure: always names the URL; 404 carries a triage hint. */
+    private fun describeHttpFailure(code: Int, text: String, url: String): String {
+        val base = "HTTP $code: ${text.take(200)}（$url）"
+        if (code == 404) {
+            return base + "。404 通常表示：桌面端没有运行（隧道边缘直接回 404）、" +
+                "隧道没有转发到 DSH 端口、或桌面端插件未加载；请先确认桌面端已启动"
+        }
+        return base
     }
 
     private fun executeAndParse(url: String, body: String): JsonObject {
         val req = Request.Builder()
             .url(url)
-            .header("Cookie", cookieHeader())
+            .channelAuth()
             .header("Accept", "application/json")
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
+        return parseEnvelopeOrThrow(url, req)
+    }
+
+    /** Runs the call and unwraps the {result:{ok,value|error}} SDK envelope. */
+    private fun parseEnvelopeOrThrow(url: String, req: Request): JsonObject {
         http.newCall(req).execute().use { resp ->
             val text = resp.body?.string() ?: throw DshApiException(null, "empty response (HTTP ${resp.code})", resp.code)
             if (resp.code == 401) {
@@ -242,7 +313,8 @@ class DshClient {
                 if (channel == "plugin") {
                     throw DshApiException(
                         "forbidden",
-                        "配对已被桌面端撤销（远程访问被停止或设备被移除）。请在桌面端重新复制配对链接，并在 10 分钟内粘贴连接",
+                        "设备未配对或配对已被桌面端撤销（远程访问被停止/设备被移除）。" +
+                            "请在桌面端重新复制配对链接，并在有效期内重新连接",
                         resp.code,
                     )
                 }
@@ -254,7 +326,7 @@ class DshClient {
                 )
             }
             if (!resp.isSuccessful) {
-                throw DshApiException(null, "HTTP ${resp.code}: ${text.take(200)}", resp.code)
+                throw DshApiException(null, describeHttpFailure(resp.code, text, url), resp.code)
             }
             val root = runCatching { DSH_JSON.parseToJsonElement(text).asObj() }.getOrNull()
                 ?: throw DshApiException("bad-json", "unexpected response: ${text.take(200)}", resp.code)
@@ -270,7 +342,7 @@ class DshClient {
 
     // ---------------- realtime ----------------
 
-    /** Core channel: open the live session stream over the gateway WebSocket mux. */
+    /** Open the live session stream over the gateway WebSocket mux (plugin channel rides /remote). */
     fun openFollow(
         sessionId: String,
         maxMessages: Int = 400,
@@ -279,11 +351,19 @@ class DshClient {
     ): WebSocket {
         val httpUrl = baseUrl().toHttpUrlOrNull()
             ?: throw DshApiException("bad-host", "无法解析主机地址：$host")
-        val wsUrl = httpUrl.newBuilder()
-            .scheme(if (httpUrl.isHttps) "wss" else "ws")
-            .encodedPath("/api/remote.mux")
+        // OkHttp 4 HttpUrl only accepts http/https — scheme("wss") throws
+        // "unexpected scheme: wss". newWebSocket upgrades an https URL to wss
+        // (or http to ws) by itself, so pass the http(s) URL as-is.
+        val wsBuilder = httpUrl.newBuilder()
+            .encodedPath(apiPrefix() + "/remote.mux")
             .query(null)
-            .build()
+        // WS handshakes cannot carry custom headers on the Web API side, so the
+        // plugin gate also accepts the device id as a query parameter; the
+        // cookie stays primary and we send both.
+        if (channel == "plugin" && deviceId.isNotBlank()) {
+            wsBuilder.addQueryParameter("device", deviceId.trim())
+        }
+        val wsUrl = wsBuilder.build()
         val streamId = UUID.randomUUID().toString()
         val openMsg = buildJsonObject {
             put("type", "open")
@@ -303,7 +383,7 @@ class DshClient {
         }.toString()
         val request = Request.Builder()
             .url(wsUrl)
-            .header("Cookie", cookieHeader())
+            .channelAuth()
             .build()
         return http.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -323,7 +403,16 @@ class DshClient {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                onTerminal(t)
+                val code = response?.code
+                onTerminal(
+                    if (code != null) {
+                        DshApiException(
+                            "ws-handshake",
+                            "WebSocket 握手失败（HTTP $code）：${t.message ?: "连接中断"}（${wsUrl}）",
+                            code,
+                        )
+                    } else t,
+                )
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -332,36 +421,4 @@ class DshClient {
         })
     }
 
-    class StreamHandle(private val cancelFn: () -> Unit) {
-        fun cancel() = cancelFn()
-    }
-
-    /** Plugin channel: SSE event stream carrying session/event frames. */
-    fun openBffEvents(
-        onFrame: (JsonObject) -> Unit,
-        onTerminal: (Throwable?) -> Unit,
-    ): StreamHandle {
-        val request = Request.Builder()
-            .url(baseUrl() + "/m/api/events.mux")
-            .header("Cookie", cookieHeader())
-            .header("Accept", "text/event-stream")
-            .build()
-        val source = EventSources.createFactory(http).newEventSource(request, object : EventSourceListener() {
-            override fun onEvent(es: EventSource, id: String?, type: String?, data: String) {
-                val d = data.takeIf { it.isNotBlank() } ?: return
-                val o = runCatching { DSH_JSON.parseToJsonElement(d).asObj() }.getOrNull() ?: return
-                onFrame(o)
-            }
-
-            override fun onFailure(es: EventSource, t: Throwable?, response: Response?) {
-                val code = response?.code
-                onTerminal(t ?: RuntimeException("事件流中断（HTTP ${code ?: "?"}）"))
-            }
-
-            override fun onClosed(es: EventSource) {
-                onTerminal(null)
-            }
-        })
-        return StreamHandle { source.cancel() }
-    }
 }

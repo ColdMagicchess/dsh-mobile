@@ -10,27 +10,25 @@ import kotlinx.serialization.json.put
 import java.util.TimeZone
 import java.util.UUID
 
-/** High-level DSH operations; routes each call through the active channel. */
+/**
+ * High-level DSH operations, written against the dsh-web-all 0.3.12 contract:
+ * the plugin channel no longer has a /m/api BFF — remote-web-ui exposes the
+ * gated `/remote` mirror of the FULL host API, so both channels share one
+ * call surface. Only the URL prefix and the credentials differ, and those are
+ * handled inside DshClient (apiPrefix + pairing cookie/device id).
+ */
 class DshRepository(private val client: DshClient) {
-
-    private val plugin: Boolean get() = client.channel == "plugin"
 
     // ---------------- sessions ----------------
 
     suspend fun listSessions(): List<SessionSummary> {
-        val value = if (plugin) {
-            client.rpcBff("session.list", buildJsonObject { })
-        } else {
-            client.rpc("session/list", buildJsonObject { put("_request", buildJsonObject { }) })
-        }
+        val value = client.rpc("session/list", buildJsonObject { put("_request", buildJsonObject { }) })
         val items = value.arr("items") ?: value.arr("sessions") ?: return emptyList()
         return items.mapNotNull { it.asObj()?.toSessionSummary() }
     }
 
     private fun JsonObject.toSessionSummary(): SessionSummary? {
         val id = str("sessionId") ?: str("id") ?: return null
-        // Core puts projections.values.title as a plain string; the plugin
-        // BFF may flatten title/displayTitle at item level.
         val title = str("title")
             ?: str("displayTitle")
             ?: prim("projections", "values", "title")?.contentOrNull?.takeIf { it.isNotBlank() }
@@ -58,8 +56,7 @@ class DshRepository(private val client: DshClient) {
             agentPreset?.takeIf { it.isNotBlank() }?.let { put("agentPreset", it) }
             workspaceId?.takeIf { it.isNotBlank() }?.let { put("workspaceId", it) }
         }
-        val value = if (plugin) client.rpcBff("session.create", req)
-        else client.rpc("session/create", buildJsonObject { put("request", req) })
+        val value = client.rpc("session/create", buildJsonObject { put("request", req) })
         return value.str("sessionId") ?: value.str("id")
             ?: throw DshApiException("bad-value", "create：响应缺少 sessionId")
     }
@@ -83,62 +80,50 @@ class DshRepository(private val client: DshClient) {
                 })
             }
         }
-        if (plugin) {
-            // The BFF injects the requestId itself.
-            client.rpcBff("session.prompt", buildJsonObject {
+        client.rpc("session/prompt", buildJsonObject {
+            put("request", buildJsonObject {
+                put("requestId", UUID.randomUUID().toString())
                 put("sessionId", sessionId)
-                put("mode", mode.ifBlank { "queue" })
+                put("mode", mode.ifBlank { "steer" })
                 put("content", content)
                 put("clientTimeZone", TimeZone.getDefault().id)
             })
-        } else {
-            client.rpc("session/prompt", buildJsonObject {
-                put("request", buildJsonObject {
-                    put("requestId", UUID.randomUUID().toString())
-                    put("sessionId", sessionId)
-                    put("mode", mode.ifBlank { "steer" })
-                    put("content", content)
-                    put("clientTimeZone", TimeZone.getDefault().id)
-                })
-            })
-        }
-    }
-
-    /** Plugin channel history (the core channel gets history inside the follow snapshot). */
-    suspend fun history(sessionId: String, maxMessages: Int = 200): List<JsonElement> {
-        if (!plugin) return emptyList()
-        val value = client.rpcBff("session.history", buildJsonObject {
-            put("sessionId", sessionId)
-            put("maxMessages", maxMessages)
         })
-        return (value.arr("events") ?: value.arr("records") ?: return emptyList()).toList()
     }
 
     suspend fun cancel(sessionId: String) {
-        if (plugin) client.rpcBff("session.cancel", buildJsonObject { put("sessionId", sessionId) })
-        else client.rpc("session/cancel", buildJsonObject {
+        client.rpc("session/cancel", buildJsonObject {
             put("request", buildJsonObject { put("sessionId", sessionId) })
         })
     }
 
     /**
-     * Plugin channel live events: the BFF keeps a persistent session.follow
-     * accumulator per session; polling session.pending is the designed
-     * frp-friendly realtime path (the SSE mux carries approvals only).
+     * Workspace picker rows. 0.3.12 source: the dsh-session-archive plugin
+     * (bundled in dsh-web-all) exposes `/api/dsh-session-archive/inventory`
+     * whose `workspaces` projection carries id/title/path — reachable on the
+     * plugin channel through the /remote gate and on the core channel directly.
+     * Falls back to a gateway workspace/list probe for hosts without the plugin.
      */
-    suspend fun pendingEvents(sessionId: String): List<JsonElement> {
-        val value = client.rpcBff("session.pending", buildJsonObject { put("sessionId", sessionId) })
-        return (value.arr("events") ?: return emptyList()).toList()
-    }
-
     suspend fun listWorkspaces(): List<WorkspaceOption> {
-        if (!plugin) return emptyList()
-        val value = client.rpcBff("workspace.list", buildJsonObject { })
-        return value.arr("items").orEmpty().mapNotNull {
-            val o = it.asObj() ?: return@mapNotNull null
-            val path = o.str("path") ?: return@mapNotNull null
-            WorkspaceOption(o.str("workspaceId"), path, o.str("title"))
+        runCatching {
+            val inv = client.getJson("dsh-session-archive/inventory")
+            val rows = inv.arr("workspaces").orEmpty().mapNotNull { w ->
+                val o = w.asObj() ?: return@mapNotNull null
+                val path = o.str("path") ?: return@mapNotNull null
+                WorkspaceOption(o.str("id") ?: o.str("workspaceId"), path, o.str("title"))
+            }
+            if (rows.isNotEmpty()) return rows
         }
+        runCatching {
+            val value = client.rpc("workspace/list", buildJsonObject { })
+            val rows = value.arr("items").orEmpty().mapNotNull {
+                val o = it.asObj() ?: return@mapNotNull null
+                val path = o.str("path") ?: return@mapNotNull null
+                WorkspaceOption(o.str("workspaceId") ?: o.str("id"), path, o.str("title"))
+            }
+            if (rows.isNotEmpty()) return rows
+        }
+        return emptyList()
     }
 
     // ---------------- models ----------------
@@ -150,39 +135,10 @@ class DshRepository(private val client: DshClient) {
             put("model", model)
             reasoningEffort?.takeIf { it.isNotBlank() }?.let { put("reasoningEffort", it) }
         }
-        if (plugin) client.rpcBff("session.selectModel", req)
-        else client.rpc("session/selectModel", buildJsonObject { put("request", req) })
+        client.rpc("session/selectModel", buildJsonObject { put("request", req) })
     }
 
     suspend fun modelCatalog(sessionId: String?): List<ModelGroup> {
-        if (plugin) {
-            val value = client.rpcBff("session.models", buildJsonObject { })
-            // The BFF proxies modelCatalog: {groups:[{id,name,models:[…]}], current, …}
-            val raw = value.arr("groups") ?: value.arr("models") ?: value.arr("items")
-                ?: return emptyList()
-            val first = raw.firstOrNull()?.asObj()
-            val isGrouped = first?.containsKey("models") == true
-            return if (isGrouped) raw.mapNotNull { g ->
-                val go = g.asObj() ?: return@mapNotNull null
-                val gid = go.str("id") ?: return@mapNotNull null
-                val models = go.arr("models").orEmpty().mapNotNull { m ->
-                    val mo = m.asObj() ?: return@mapNotNull null
-                    val mid = mo.str("id") ?: return@mapNotNull null
-                    val efforts = mo.obj("reasoning")?.arr("efforts").orEmpty().mapNotNull { e ->
-                        e.asObj()?.str("id") ?: e.asPrim()?.contentOrNull
-                    }
-                    ModelEntry(mid, mo.str("name") ?: "", efforts, mo.obj("reasoning")?.str("defaultEffort"))
-                }
-                ModelGroup(gid, go.str("name") ?: "", models)
-            } else {
-                val entries = raw.mapNotNull { m ->
-                    val mo = m.asObj() ?: return@mapNotNull null
-                    val mid = mo.str("id") ?: mo.str("model") ?: return@mapNotNull null
-                    ModelEntry(mid, mo.str("name") ?: mid, emptyList(), null)
-                }
-                listOf(ModelGroup("models", "模型", entries))
-            }
-        }
         val value = client.rpc("session/modelCatalog")
         return value.arr("groups").orEmpty().mapNotNull { g ->
             val go = g.asObj() ?: return@mapNotNull null
@@ -201,10 +157,9 @@ class DshRepository(private val client: DshClient) {
 
     // ---------------- agent presets ----------------
 
-    /** Preset roster: core `agentPresets/list`, or the plugin BFF's `agentPreset.list` proxy. */
+    /** Preset roster: the host gateway's agentPresets/list (both channels). */
     suspend fun listAgentPresets(): List<AgentPresetRow> {
-        val value = if (plugin) client.rpcBff("agentPreset.list", buildJsonObject { })
-        else client.rpc("agentPresets/list")
+        val value = client.rpc("agentPresets/list")
         return value.arr("presets").orEmpty().mapNotNull { p ->
             val o = p.asObj() ?: return@mapNotNull null
             val id = o.str("id") ?: return@mapNotNull null
@@ -219,7 +174,8 @@ class DshRepository(private val client: DshClient) {
     }
 
     /**
-     * Switch a live session's preset. The host refuses once the conversation
+     * Switch a live session's preset. Works on both 0.3.12 channels (the /remote
+     * mirror forwards the gateway RPC). The host refuses once the conversation
      * has started (error code agent-preset-locked); presets for new sessions
      * ride session.create's agentPreset argument instead. Wire args are flat:
      * agentId (lookup-resolved by the gateway) + agentPreset.
@@ -231,26 +187,48 @@ class DshRepository(private val client: DshClient) {
         })
     }
 
-    /** 归档对话：核心走 workspace/archiveSession；插件走 BFF 透传 session.archive。 */
+    // ---------------- archive ----------------
+
+    /**
+     * Archive a session: the host gateway RPC workspace/archiveSession is the
+     * primary path; if the host rejects it, fall back to the bundled
+     * dsh-session-archive plugin's batch archive route.
+     */
     suspend fun archiveSession(sessionId: String) {
-        if (plugin) client.rpcBff("session.archive", buildJsonObject { put("sessionId", sessionId) })
-        else client.rpc("workspace/archiveSession", buildJsonObject {
-            put("request", buildJsonObject { put("sessionId", sessionId) })
-        })
+        try {
+            client.rpc("workspace/archiveSession", buildJsonObject {
+                put("request", buildJsonObject { put("sessionId", sessionId) })
+            })
+        } catch (e: DshApiException) {
+            val value = client.postJson(
+                "dsh-session-archive/archive",
+                buildJsonObject { put("ids", buildJsonArray { add(sessionId) }) },
+            )
+            for (row in value.arr("results").orEmpty()) {
+                val o = row.asObj() ?: continue
+                if (o.bool("ok") == false) {
+                    throw DshApiException(o.str("reason") ?: "archive-failed", "归档失败：${o.str("reason") ?: "未知原因"}")
+                }
+            }
+        }
     }
 
-    /** 已归档会话 id（插件通道经 session.archived 返回注册表状态；核心通道暂无来源）。 */
+    /**
+     * 已归档会话 id（桌面端归档/删除后同步隐藏）。0.3.12 来源：dsh-session-archive
+     * inventory 的 archivedSessionIds（注册表归档集合），两个通道都可读；
+     * 插件未安装时返回空集合（归档仍可用，只是不同步）。
+     */
     suspend fun listArchivedSessionIds(): Set<String> {
-        if (!plugin) return emptySet()
-        val value = client.rpcBff("session.archived", buildJsonObject { })
-        return value.arr("archivedSessionIds").orEmpty()
-            .mapNotNull { it.asPrim()?.contentOrNull }.toSet()
+        return runCatching {
+            val inv = client.getJson("dsh-session-archive/inventory")
+            inv.arr("archivedSessionIds").orEmpty()
+                .mapNotNull { it.asPrim()?.contentOrNull }.toSet()
+        }.getOrDefault(emptySet())
     }
 
     // ---------------- search / fallback ----------------
 
     suspend fun search(query: String): List<Pair<String, String>> {
-        if (plugin) throw DshApiException("unsupported", "插件通道暂不支持搜索")
         val value = client.rpc("session/search", buildJsonObject {
             put("request", buildJsonObject { put("query", query) })
         })
@@ -261,10 +239,32 @@ class DshRepository(private val client: DshClient) {
         }
     }
 
-    /** Catch-up event fetch: core uses inspect, plugin uses session.history. */
-    suspend fun catchUpEvents(sessionId: String): List<JsonElement> {
-        if (plugin) return history(sessionId, maxMessages = 500)
-        val value = client.rpc("session/inspect", buildJsonObject { put("sessionId", sessionId) })
-        return value.arr("events").orEmpty().toList()
+    /**
+     * Catch-up fetch while the live socket is down (the store's seq watermark
+     * dedupes overlap). 0.3.12: session/inspect is gone and session/page only
+     * pages backward with throughSeq <= the journal cursor ("past cursor" is
+     * rejected), so first learn the session's projection watermark from
+     * session/list (projections.asOfSeq), then page to exactly that point.
+     */
+    suspend fun catchUpEvents(sessionId: String, watermark: Long): List<JsonElement> {
+        val list = client.rpc("session/list", buildJsonObject { put("_request", buildJsonObject { }) })
+        val asOfSeq = list.arr("items").orEmpty()
+            .firstOrNull { it.asObj()?.str("sessionId") == sessionId }
+            ?.asObj()?.obj("projections")?.long("asOfSeq")
+            ?: return emptyList()
+        if (asOfSeq <= watermark) return emptyList()
+        val value = client.rpc("session/page", buildJsonObject {
+            put("request", buildJsonObject {
+                put("address", buildJsonObject {
+                    put("kind", "session")
+                    put("sessionId", sessionId)
+                })
+                put("throughSeq", asOfSeq)
+                put("maxMessages", 250)
+            })
+        })
+        // page answers wrapped history records ({type:"event",event}/{type:"chunks",event})
+        // — exactly the shape MessageStore.applyRecords already folds.
+        return value.arr("records").orEmpty().toList()
     }
 }

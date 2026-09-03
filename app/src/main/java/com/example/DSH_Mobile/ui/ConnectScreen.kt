@@ -190,8 +190,9 @@ fun ConnectScreen(state: AppUiState, vm: AppViewModel) {
 
             Spacer(Modifier.height(30.dp))
             Text(
-                "配对链接一次性有效，过期或已使用请回桌面端重新复制。" +
-                    "含 ?pair= 的链接走插件通道，含 ?token= 的启动链接走核心通道（支持切换模型）。",
+                "配对链接短期有效，过期或已使用请回桌面端重新复制。" +
+                    "含 ?pair= 的链接走 dsh-web-all 0.3.12 的手机通道（/remote，功能完整）；" +
+                    "含 ?token= 的启动链接走核心通道。",
                 fontSize = 11.sp,
                 lineHeight = 19.sp,
                 color = Flat.Muted,

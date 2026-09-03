@@ -38,7 +38,7 @@ cd dsh-mobile
 
 ## 🚀 快速开始
 
-1. 桌面端安装 **DSH Desktop** 与 [dsh-web-all](https://github.com/zhu1090093659/dsh-web) 插件（其手机远端组件为 remote-web-ui），开启「远程访问」并复制 **`?pair=` 配对链接**（经 frp / SakuraFrp 等隧道公网暴露时，链接形如 `https://your-host:47030/m/?pair=…`）。
+1. 桌面端安装 **DSH Desktop** 与 [dsh-web-all](https://github.com/zhu1090093659/dsh-web) 插件（其手机远端组件为 remote-web-ui），开启「远程访问」并复制 **`?pair=` 配对链接**（经 frp / SakuraFrp 等隧道公网暴露时，链接形如 `https://your-host:47030/pair-accept?pair=…`）。
 2. App 连接页粘贴链接；隧道为自签 HTTPS 时打开**「信任该主机证书」**（TOFU：首次连接由一次性配对链接保护）。
 3. 点「连接」——配对一次长期有效。
 
@@ -48,25 +48,27 @@ cd dsh-mobile
 
 ## 🔌 与 dsh-web-all 插件配合使用
 
-App 的手机通道由 [dsh-web-all](https://github.com/zhu1090093659/dsh-web)（@linxin666）插件提供——它是 DSH 的 Web UI 全家桶聚合插件（remote-web-ui 手机远端 / 任务板 / Git 图 / 皮肤中心等一键安装），本项目依赖其 remote-web-ui 组件暴露的手机 BFF（`/m/api/*`）。**绝大多数功能开箱即用**，但有两处依赖宿主能力的能力默认不在插件 BFF 白名单里：
+App 的手机通道由 [dsh-web-all](https://github.com/zhu1090093659/dsh-web)（@linxin666）插件提供——它是 DSH 的 Web UI 全家桶聚合插件，本项目依赖其 remote-web-ui 组件的**手机远端通道**。
 
-| App 功能 | 需要的宿主 RPC | 默认插件 |
+**0.3.12 起（当前适配版本）**：插件不再提供 0.3.6 的 `/m/api` 手机 BFF，改为 **`/remote` 门控镜像**——配对后 App 的一切请求（RPC 信封不变）都经 `/remote/api/*` 与 `/remote/api/remote.mux` 透传到宿主，两个通道共享同一 RPC 面。**全部功能开箱即用，无需任何插件补丁**：
+
+| App 功能 | 0.3.12 实现方式 | 需要补丁 |
 | --- | --- | --- |
-| 会话归档（长按 → 归档） | `workspace/archiveSession` | ❌ 未暴露 |
-| 桌面端归档/删除后手机同步 | 注册表 `archivedSessionIds` | ❌ 未暴露 |
+| 会话归档（长按 → 归档） | 宿主 RPC `workspace/archiveSession`（回退 dsh-session-archive 插件路由） | ❌ 不需要 |
+| 桌面端归档/删除后手机同步 | dsh-session-archive `inventory` 的 `archivedSessionIds` | ❌ 不需要 |
 
-因此需要对插件做**少量透传补丁**（新增 `session.archive` / `session.archived` 两个 BFF 方法），完整步骤、验证与回滚见 **[PLUGIN_PATCH.md](./PLUGIN_PATCH.md)**。
+历史资料（0.3.6 运行时补丁的做法、重打与回滚步骤）见 **[PLUGIN_PATCH.md](./PLUGIN_PATCH.md)**（已标注作废）。
 
-> 未打补丁时：对话、流式、公式、图片、模型切换、工作区、智能体预设全部可用，仅"归档/同步"不可用（App 会提示）。
-
-### 通道对照
+### 通道对照（0.3.12）
 
 | 能力 | 插件通道（`?pair=`，推荐） | 核心通道（`?token=` / cookie） |
 | --- | --- | --- |
 | 对话 / 流式 / 图片 / 模型 / 预设 | ✅ | ✅ |
-| 会话归档 + 同步 | ✅（需补丁） | ✅ 原生 |
-| 已有会话切换预设 | ❌（提示新建对话） | ✅ |
-| 会话搜索 | ❌ | ✅ |
+| 会话归档 + 同步 | ✅ | ✅ |
+| 已有会话切换预设 | ✅ | ✅ |
+| 会话搜索 | ✅ | ✅ |
+
+> 两通道的差异只剩 URL 前缀（`/remote/api` vs `/api`）与凭据（配对 cookie + 设备 id vs `dsh-auth-` cookie）；0.3.6 时代插件通道的预设切换/搜索限制已随 `/remote` 镜像消失。
 
 ## 🔒 安全须知
 
@@ -129,7 +131,7 @@ cd dsh-mobile
 
 ## 🚀 Quick start
 
-1. On the desktop: install **DSH Desktop** plus the [dsh-web-all](https://github.com/zhu1090093659/dsh-web) plugin (whose remote-web-ui component powers the mobile channel), enable "Remote Access" and copy the **`?pair=` pairing link** (behind an frp tunnel it looks like `https://your-host:47030/m/?pair=…`).
+1. On the desktop: install **DSH Desktop** plus the [dsh-web-all](https://github.com/zhu1090093659/dsh-web) plugin (whose remote-web-ui component powers the mobile channel), enable "Remote Access" and copy the **`?pair=` pairing link** (behind an frp tunnel it looks like `https://your-host:47030/pair-accept?pair=…`).
 2. Paste it in the app; for self-signed tunnels (SakuraFrp etc.) enable **"Trust this host certificate"** (TOFU — the first connection is protected by the one-time pairing link).
 3. Tap **Connect**. Pairing persists.
 
@@ -139,25 +141,27 @@ cd dsh-mobile
 
 ## 🔌 Using it with the dsh-web-all plugin
 
-The mobile channel is powered by the [dsh-web-all](https://github.com/zhu1090093659/dsh-web) plugin (@linxin666) — an all-in-one DSH Web UI bundle (remote-web-ui mobile remote / task board / git graph / skin center, one-click install). This project relies on its remote-web-ui component exposing the mobile BFF (`/m/api/*`). **Everything works out of the box except two capabilities** that the plugin BFF does not expose by default:
+The mobile channel is powered by the [dsh-web-all](https://github.com/zhu1090093659/dsh-web) plugin (@linxin666) — an all-in-one DSH Web UI bundle. This project relies on its remote-web-ui component for the **mobile remote channel**.
 
-| App feature | Required host RPC | Stock plugin |
+**Since 0.3.12 (the currently adapted version)** the plugin no longer ships the 0.3.6 `/m/api` mobile BFF; instead it exposes a **gated `/remote` mirror** — after pairing, every app request (same RPC envelope) rides `/remote/api/*` and `/remote/api/remote.mux` into the host, so both channels share one RPC surface. **Everything works out of the box, no plugin patch required**:
+
+| App feature | 0.3.12 implementation | Patch needed |
 | --- | --- | --- |
-| Session archiving (long-press → archive) | `workspace/archiveSession` | ❌ not exposed |
-| Syncing desktop archives/deletions | registry `archivedSessionIds` | ❌ not exposed |
+| Session archiving (long-press → archive) | host RPC `workspace/archiveSession` (fallback: dsh-session-archive plugin route) | ❌ no |
+| Syncing desktop archives/deletions | dsh-session-archive `inventory` → `archivedSessionIds` | ❌ no |
 
-Apply a **small passthrough patch** to the plugin (adds two BFF methods, `session.archive` / `session.archived`) — full instructions, verification and rollback in **[PLUGIN_PATCH.md](./PLUGIN_PATCH.md)**.
+Historical material (the 0.3.6 runtime patch, re-apply and rollback steps) lives in **[PLUGIN_PATCH.md](./PLUGIN_PATCH.md)** (marked obsolete).
 
-> Without the patch: chat, streaming, formulas, images, models, workspaces and presets all work; only "archive / sync" is unavailable (the app tells you).
-
-### Channel matrix
+### Channel matrix (0.3.12)
 
 | Capability | Plugin channel (`?pair=`, recommended) | Core channel (`?token=` / cookie) |
 | --- | --- | --- |
 | Chat / streaming / images / models / presets | ✅ | ✅ |
-| Session archive + sync | ✅ (patched) | ✅ native |
-| Switch preset of an existing session | ❌ (hints to start a new chat) | ✅ |
-| Session search | ❌ | ✅ |
+| Session archive + sync | ✅ | ✅ |
+| Switch preset of an existing session | ✅ | ✅ |
+| Session search | ✅ | ✅ |
+
+> The channels now differ only in URL prefix (`/remote/api` vs `/api`) and credentials (pairing cookie + device id vs `dsh-auth-` cookie); the 0.3.6-era plugin-channel limitations on preset switching and search are gone with the `/remote` mirror.
 
 ## 🔒 Security notes
 

@@ -208,18 +208,8 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                 contentColor = Flat.Ink,
             ) {
             Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                Spacer(Modifier.height(62.dp))
-                val headerTitle = liveTitle ?: session?.title
-                if (!headerTitle.isNullOrBlank()) {
-                    Text(
-                        headerTitle,
-                        fontSize = 13.sp,
-                        color = Flat.Muted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(start = 70.dp, end = 16.dp, bottom = 2.dp),
-                    )
-                }
+                // 顶部只预留悬浮按钮行（紧贴刘海下沿），对话名不在聊天内显示
+                Spacer(Modifier.height(56.dp))
                 MessageList(
                     messages = messages,
                     isDraftEmpty = session == null && messages.isEmpty(),
@@ -251,12 +241,12 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
             }
             }
 
-            // ---------- 左上悬浮：菜单圆钮 + 模型胶囊 ----------
+            // ---------- 左上悬浮：菜单圆钮 + 模型胶囊（上提贴住刘海下沿） ----------
             Row(
                 Modifier
                     .align(Alignment.TopStart)
                     .statusBarsPadding()
-                    .padding(12.dp),
+                    .padding(start = 12.dp, top = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -549,8 +539,22 @@ private fun MessageList(
         }
     }
 
+    // 右滑打开对话记录抽屉：空草稿占位与消息列表共用同一手势（只累计向右
+    // 拖动，不影响纵向滚动）；阈值 120dp → 80dp，更短距离即可触发。
+    val swipeModifier = modifier.pointerInput(Unit) {
+        var totalDrag = 0f
+        detectHorizontalDragGestures(
+            onDragStart = { totalDrag = 0f },
+            onHorizontalDrag = { _, amount -> totalDrag += amount },
+            onDragEnd = {
+                if (totalDrag > thresholdPx) onSwipeToOpen()
+                totalDrag = 0f
+            },
+        )
+    }
+
     if (isDraftEmpty) {
-        Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Box(swipeModifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("说点什么，开始新对话", fontSize = 15.sp, color = Flat.Muted)
                 Spacer(Modifier.height(6.dp))
@@ -562,18 +566,7 @@ private fun MessageList(
 
     LazyColumn(
         state = listState,
-        modifier = modifier.pointerInput(Unit) {
-            // 右滑打开对话记录抽屉（只累计向右的拖动，不影响纵向滚动）
-            var totalDrag = 0f
-            detectHorizontalDragGestures(
-                onDragStart = { totalDrag = 0f },
-                onHorizontalDrag = { _, amount -> totalDrag += amount },
-                onDragEnd = {
-                    if (totalDrag > 120.dp.toPx()) onSwipeToOpen()
-                    totalDrag = 0f
-                },
-            )
-        },
+        modifier = swipeModifier,
         contentPadding = PaddingValues(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -639,9 +632,27 @@ private fun AssistantBubble(m: ChatMessage) {
             }
             if (body.isNotBlank()) {
                 if (m.pending) {
-                    // 公式抽搐已由 MarkdownText 的 drawable 缓存根治（已见过的公式
-                    // 高度稳定），流式期间全程保留打字机节奏。
-                    TypewriterMarkdown(body, pending = true, color = Flat.Ink)
+                    // 公式抽搐已由 MarkdownText 的 drawable 缓存根治，打字机全程保留。
+                    // 表格（TableRowSpan 每次重建都两遍布局，绝不能进 45ms 重解析路径）
+                    // 采用渐进分段：已完成行进稳定前缀按真表格渲染——前缀字符串在
+                    // 下一行完成前不变，Compose 跳过重组 → 表格零闪烁逐行生长；
+                    // 正在输入的尾行走打字机 + 分隔行中和，行完成即并入前缀。
+                    val split = splitAtLastTableRow(body)
+                    if (split == null) {
+                        TypewriterMarkdown(neutralizeTablesForStreaming(body), pending = true, color = Flat.Ink)
+                    } else {
+                        Column {
+                            MarkdownText(split.stablePrefix, color = Flat.Ink)
+                            if (split.liveTail.isNotBlank()) {
+                                TypewriterMarkdown(
+                                    neutralizeTablesForStreaming(split.liveTail),
+                                    pending = true,
+                                    resetKey = split.stablePrefix,
+                                    color = Flat.Ink,
+                                )
+                            }
+                        }
+                    }
                 } else {
                     MarkdownText(body, color = Flat.Ink)
                 }
@@ -693,7 +704,10 @@ private fun ReasoningSection(m: ChatMessage) {
                     .background(Flat.Fill.copy(alpha = 0.6f))
                     .padding(10.dp),
             ) {
-                MarkdownText(m.reasoning, Modifier.fillMaxWidth())
+                MarkdownText(
+                    if (m.pending) neutralizeTablesForStreaming(m.reasoning) else m.reasoning,
+                    Modifier.fillMaxWidth(),
+                )
             }
         }
     }

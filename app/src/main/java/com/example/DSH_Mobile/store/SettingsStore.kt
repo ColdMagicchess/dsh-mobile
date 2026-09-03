@@ -24,6 +24,8 @@ data class ConnectionSettings(
     val mode: String = "steer",
     val channel: String = "core",
     val trustInsecure: Boolean = false,
+    /** Paired-device session id (0.3.12): cookieless credential fallback. */
+    val deviceId: String = "",
 )
 
 /**
@@ -45,16 +47,27 @@ class SettingsStore(private val context: Context) {
             mode = prefs[KEY_MODE] ?: "steer",
             channel = prefs[KEY_CHANNEL] ?: "core",
             trustInsecure = prefs[KEY_TRUST] == true,
+            deviceId = prefs[KEY_DEVICE_ENC]?.let { enc ->
+                runCatching { decrypt(enc) }.getOrDefault("")
+            } ?: "",
         )
     }
 
-    suspend fun saveHostCookie(host: String, cookie: String, cookieName: String, channel: String, trustInsecure: Boolean) {
+    suspend fun saveHostCookie(
+        host: String,
+        cookie: String,
+        cookieName: String,
+        channel: String,
+        trustInsecure: Boolean,
+        deviceId: String = "",
+    ) {
         context.dataStore.edit { p ->
             p[KEY_HOST] = host
             if (cookie.isEmpty()) p.remove(KEY_COOKIE_ENC) else p[KEY_COOKIE_ENC] = encrypt(cookie)
             p[KEY_COOKIE_NAME] = cookieName
             p[KEY_CHANNEL] = channel
             p[KEY_TRUST] = trustInsecure
+            if (deviceId.isEmpty()) p.remove(KEY_DEVICE_ENC) else p[KEY_DEVICE_ENC] = encrypt(deviceId)
         }
     }
 
@@ -111,5 +124,6 @@ class SettingsStore(private val context: Context) {
         private val KEY_MODE = stringPreferencesKey("send_mode")
         private val KEY_CHANNEL = stringPreferencesKey("channel")
         private val KEY_TRUST = booleanPreferencesKey("trust_insecure")
+        private val KEY_DEVICE_ENC = stringPreferencesKey("remote_device_enc")
     }
 }

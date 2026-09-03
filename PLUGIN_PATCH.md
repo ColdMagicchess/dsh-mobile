@@ -1,5 +1,18 @@
 # 插件补丁：dsh-remote-web-ui 手机通道扩展（归档对话）
 
+> **0.3.12 起本补丁整体作废（2026-09-02）**：dsh-web-all 0.3.12 移除了 `/m/api` BFF，
+> 手机通道改为 `/remote` 门控镜像（完整宿主 API 透传）。App 已改为：归档走宿主 RPC
+> `workspace/archiveSession`（回退 dsh-session-archive 插件的 `/api/dsh-session-archive/archive`），
+> 归档名单与工作区列表走 `/api/dsh-session-archive/inventory`——**不再需要任何运行时补丁，
+> 也不需要源码级 mobile-api 补丁**。下文仅作为 0.3.6 时代的历史资料保留。
+
+> **当前状态（2026-09-02，源码安装部署）**：本机已改为**从源码构建安装** 0.3.12 全家桶
+> （`plugin-src/dsh-web-0.3.12`，经 `link-profile.mjs` junction 进 profile）。`session.archive` /
+> `session.archived` 已作为源码级 BFF 实现内置于 `packages/dsh-remote-web-ui/src/mobile-api.ts`
+> （随包构建与安装，不再需要运行时补丁，重装/重建源码包也不会丢失），且整个手机 BFF
+> （`/m/api/*`）随源码回归。下文的运行时补丁流程仅适用于**从 npm 安装的官方 0.3.6 插件**
+> （0.3.9+ 已无 `/m/api`，运行时补丁无从下手，需要走源码级方案）。
+
 > **为什么有这个补丁**：App 的插件通道（`?pair=` 配对）只能调用 remote-web-ui 插件 BFF 白名单里的方法。
 > "归档对话" 需要核心网关的 `workspace/archiveSession`，"同步桌面端归档/删除" 需要读取 workspace
 > 注册表的 `archivedSessionIds`——两者都不在插件白名单里，因此给**已安装的插件**打了运行时补丁。

@@ -2,6 +2,7 @@ package com.example.DSH_Mobile
 
 import com.example.DSH_Mobile.dsh.DSH_JSON
 import com.example.DSH_Mobile.dsh.MessageStore
+import com.example.DSH_Mobile.dsh.Role
 import kotlinx.serialization.json.JsonElement
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -9,6 +10,21 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MessageStoreTest {
+
+    @Test
+    fun gfmTablesExtensionParsesPipeTables() {
+        // TablePlugin 内部用的就是这套 GFM 扩展；先在 JVM 侧证明该格式可解析。
+        val ext = org.commonmark.ext.gfm.tables.TablesExtension.create()
+        val parser = org.commonmark.parser.Parser.builder().extensions(listOf(ext)).build()
+        val doc = parser.parse(
+            "| 场景 | 单元格 | 涂染 |\n|:---:|:---:|:---:|\n| 行列式 | 公式 | ok |",
+        )
+        val first = doc.firstChild
+        assertTrue(
+            "first block should be TableBlock but was " + (first?.javaClass?.name ?: "null"),
+            first is org.commonmark.ext.gfm.tables.TableBlock,
+        )
+    }
 
     private fun entry(type: String, seq: Long, data: String): JsonElement =
         DSH_JSON.parseToJsonElement(
@@ -85,6 +101,29 @@ class MessageStoreTest {
             ),
         )
         assertEquals(1, store.messages.value.count { it.role.name == "ASSISTANT" && it.text == long })
+    }
+
+    @Test
+    fun twoStepsOfSameTurnStaySeparateBubbles() {
+        val store = MessageStore()
+        // step1：流式增量 + 收尾消息（与用户截图场景一致）
+        store.applyRecords(
+            listOf(
+                entry("assistant/chunk", 1, """{"turn":7,"step":1,"chunk":{"type":"text-delta","index":0,"text":"看到问题了 —— 先读当前规则。"}}"""),
+                entry("assistant/message", 2, """{"turn":7,"step":1,"message":{"id":"aX","content":[{"type":"text","text":"看到问题了 —— 先读当前规则。"}]}}"""),
+            ),
+        )
+        // step2：同一 turn 的下一段流式 —— 绝不能追加进步1气泡
+        store.applyRecords(
+            listOf(
+                entry("assistant/chunk", 3, """{"turn":7,"step":2,"chunk":{"type":"text-delta","index":0,"text":"根因清楚了。"}}"""),
+                entry("assistant/message", 4, """{"turn":7,"step":2,"message":{"id":"aY","content":[{"type":"text","text":"根因清楚了。"}]}}"""),
+                entry("turn/end", 5, """{"turn":7,"reason":{"kind":"completed"}}"""),
+            ),
+        )
+        val asst = store.messages.value.filter { it.role == Role.ASSISTANT }
+        assertEquals(listOf("看到问题了 —— 先读当前规则。", "根因清楚了。"), asst.map { it.text })
+        assertTrue(asst.all { !it.pending })
     }
 
     @Test

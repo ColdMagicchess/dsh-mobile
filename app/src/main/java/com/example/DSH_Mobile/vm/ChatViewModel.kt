@@ -170,13 +170,10 @@ class ChatViewModel : ViewModel() {
     /**
      * Live stream over the WS mux with automatic reconnect; after two failed
      * attempts it degrades to 2s polling of session/inspect (seq watermark
-     * still dedupes), matching the README realtime requirement.
+     * still dedupes), matching the README realtime requirement. 0.3.12: both
+     * channels use this path — the plugin channel rides the /remote mirror.
      */
     private suspend fun runStream(sessionId: String) {
-        if (Graph.client.channel == "plugin") runPluginStream(sessionId) else runCoreStream(sessionId)
-    }
-
-    private suspend fun runCoreStream(sessionId: String) {
         var attempt = 0
         while (viewModelScope.isActive && openedSessionId == sessionId) {
             attempt++
@@ -212,32 +209,10 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    private suspend fun runPluginStream(sessionId: String) {
-        try {
-            store.applyRecords(repo.history(sessionId))
-        } catch (t: Throwable) {
-            _error.value = t.message ?: "加载历史失败"
-        }
-        // The plugin's live path is session.pending polling (the SSE mux only
-        // carries approvals/questions). 200ms matches the web client cadence.
-        var failures = 0
-        while (viewModelScope.isActive && openedSessionId == sessionId) {
-            try {
-                store.applyRecords(repo.pendingEvents(sessionId))
-                failures = 0
-            } catch (e: CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                failures++
-                if (failures % 5 == 1) _error.value = t.message ?: "无法获取会话更新"
-            }
-            delay(if (failures == 0) 200L else 1500L)
-        }
-    }
 
     private suspend fun catchUp(sessionId: String) {
         try {
-            store.applyRecords(repo.catchUpEvents(sessionId))
+            store.applyRecords(repo.catchUpEvents(sessionId, store.watermark))
         } catch (t: Throwable) {
             _error.value = t.message ?: "无法获取会话更新"
         }
@@ -339,10 +314,6 @@ class ChatViewModel : ViewModel() {
         if (s == null) {
             pendingPreset = row.id
             _draftPreset.value = row.id
-            return
-        }
-        if (Graph.client.channel == "plugin") {
-            _error.value = "插件通道下已有会话不能切换预设；新建对话时选择即可生效"
             return
         }
         viewModelScope.launch {

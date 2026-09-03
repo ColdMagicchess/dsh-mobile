@@ -61,6 +61,7 @@ data class ChatMessage(
     val seq: Long = 0,
     val pending: Boolean = false,
     val turn: Int? = null,
+    val step: Int? = null,
 )
 
 data class ModelGroup(val id: String, val name: String, val models: List<ModelEntry>)

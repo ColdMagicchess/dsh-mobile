@@ -9,7 +9,7 @@
 | --- | --- |
 | 语言 / UI | Kotlin + Jetpack Compose（Material 3, dynamic color） |
 | 网络 | OkHttp（HTTP RPC + WebSocket mux）；kotlinx.serialization JSON（JsonObject 防御式解析） |
-| 实时 | WebSocket `/api/remote.mux` 逻辑流 `session/follow`；失败自动重连，2 次后退化为 `session/inspect` 2s 轮询（seq 水位去重） |
+| 实时 | WebSocket `/api/remote.mux` 逻辑流 `session/follow`；失败自动重连，2 次后退化为 `session/page` 拉日志尾部（0.3.12 起 `session/inspect` 已被宿主移除；seq 水位去重） |
 | Markdown | Markwon core + ext-latex（JLaTeXMath Android 版） |
 | LaTeX | `$...$` / `$$...$$` 由 Markwon LatexPlugin 在 TextView 内渲染（F7） |
 | 存储 | DataStore + AndroidKeyStore AES-256/GCM 加密配对 cookie |
@@ -50,12 +50,27 @@
 | `session/selectModel` | `{"request":{sessionId,provider,model,reasoningEffort?}}` | `{selected}` |
 | `session/modelCatalog` | `{}` | 模型分组目录 |
 | `session/search` | `{"request":{query}}` | `{items:[{sessionId,snippet}],hasMore}` |
-| `session/inspect` | `{"sessionId":…}`（轮询兜底） | `{meta,events:[SessionEvent]}` |
+| ~~`session/inspect`~~ | **0.3.12 已移除** → 改用 `session/page`（`{request:{address:{kind,sessionId},throughSeq,maxMessages?}}`；throughSeq 不得超出日志 cursor——宿主对超界报 "past cursor"——故先经 `session/list` 取该会话 `projections.asOfSeq` 作 throughSeq） | `{records:[{type:"event",event}|{type:"chunks",event}],hasMore}` |
 | `agentPresets/list` | `{}`（无参数） | `{presets:[{id,trust,isDefault,name?,description?,broken?}],authorable}` |
 | `agentPreset.list`（插件 BFF） | `{}` | 同上（插件代理核心网关）；BFF 白名单只有 list，没有 select |
 | `workspace/archiveSession` | `{"request":{"sessionId":…}}` | `{archivedSessionIds:[…]}`；归档后宿主在 workspace 状态中记录，`session/list` 仍会返回该会话 |
 | `session.archive` / `session.archived`（插件 BFF，本机补丁） | `{sessionId}` / `{}` | 归档透传 / 返回注册表 `archivedSessionIds`；补丁位于已安装插件 lib/index.js，改动需重启 DSH 桌面端生效。补丁详情、插件更新后重打步骤见 **PLUGIN_PATCH.md** |
 | `agentPresets/select` | `{agentId:<sessionId>,agentPreset:<id>}`（args 平铺；agentId 由网关 lookup 解析为 live agent） | 预设 id；会话已开始报错码 `agent-preset-locked` |
+
+> **0.3.12 通道更新（2026-09）**：dsh-web-all 0.3.12 起 `/m/api` 手机 BFF 彻底移除，手机通道改为 remote-web-ui 的 `/remote` 门控镜像——完整契约见 **2.3.1**；下表中标注「插件 BFF」的行为仅适用于 0.3.6。
+
+### 2.3.1 dsh-web-all 0.3.12 手机通道契约（/remote 镜像）
+
+- **配对**：`POST /api/pair/accept` body `{token}`（`?pair=` 链接里的参数）→ 200 `{ok:true, deviceId}` + `Set-Cookie: dsh_pair=<deviceId>`（HttpOnly；cookie 名可配置，以 Set-Cookie 实际名字为准）。404=token 无效、409=已用、429=限流（每 IP 10 次/30s）。App 现同时持久化 `deviceId`。
+- **数据通道**：手机端所有流量走 `/remote` 前缀（插件在 webServer 上注册的门控镜像，配对 cookie / `x-dsh-remote-device` 头（HTTP）/ `?device=`（WS）三种凭据等价）：
+  - HTTP RPC：`POST /remote/api/<ns>/<method>`，信封与核心通道完全一致（`{type:"client-request",rpcId,method:"<ns>/<method>",payload:{args:{…}}}`）——插件把请求以 loopback 形态（Host 改写 127.0.0.1、附加内部 browser-auth cookie、`sec-fetch-site: same-origin`）转发给宿主，因此**两个通道共享同一 RPC 面**，0.3.6 的 dot-method/平铺 payload 差异不复存在。
+  - WebSocket：`/remote/api/remote.mux`（帧格式与核心通道相同）。
+  - 物理本地、配对设备不可达的前缀：`/api/pair`、`/api/update`、`/api/plugin-manager`、`/api/dsh-desktop-launcher`。
+  - 未配对/被撤销：HTTP 403 + `{result:{ok:false,error:{code:'unpaired'}}}`。
+- **归档与同步（不再需要任何插件补丁）**：
+  - 归档：`workspace/archiveSession` RPC（`{"request":{"sessionId"}}`）；宿主拒绝时回退到 dsh-web-all 自带的 dsh-session-archive 插件 `POST /remote/api/dsh-session-archive/archive`（body `{ids:[…]}`，`results[].ok/reason`）。
+  - 归档名单：`GET /remote/api/dsh-session-archive/inventory` → `{archivedSessionIds, workspaces:[{id,title,path,sessionIds}], rows,…}`（核心通道直接 `/api/dsh-session-archive/inventory`）。`workspaces` 同时作为工作区选择器数据源（取代旧 BFF `workspace.list`）。
+- **App 侧代码落点**：`DshClient.apiPrefix()`（`/remote/api` vs `/api`）、`channelAuth()`（cookie + device 头）、`getJson/postJson`（插件原生 HTTP 路由）、`DshRepository`（两通道统一走核心 RPC）。
 
 ### 2.4 实时流（session/follow over /api/remote.mux）
 
@@ -95,7 +110,13 @@ app/src/test/java/com/example/DSH_Mobile/MessageStoreTest.kt  # fold 逻辑单�
 ./gradlew :app:testDebugUnitTest # fold 单元测试
 ```
 
-JDK 17 + Android SDK（local.properties 指向）。输出：`app/build/outputs/apk/debug/app-debug.apk`。
+JDK 17 + Android SDK（local.properties 指向）。输出：`app/build/outputs/apk/debug/DSH-Mobile.apk`（applicationVariants 已固定改名，不再产出 app-debug.apk）。
+
+**构建成功后自动覆盖桌面安装包**：`assembleDebug` / `assembleRelease` 成功收尾时会把 APK 覆盖复制到
+`E:\Desktop\DSH-Mobile.apk`（桌面真实位置，构建脚本经注册表 `User Shell Folders\Desktop` 自动识别，
+支持桌面重定向）。`doLast` 仅在 assemble 成功时执行，构建失败不会用坏产物覆盖桌面的旧包；
+日志行 `DSH-Mobile.apk 已覆盖到桌面：…` 即为成功标志。如需改目标目录：gradle 属性 `-PapkDropDir=…`
+或环境变量 `DSH_APK_DROP_DIR`。见 app/build.gradle.kts 末尾。
 
 ## 5. 已实现 / 待办对照（README F1–F14）
 
@@ -104,7 +125,7 @@ JDK 17 + Android SDK（local.properties 指向）。输出：`app/build/outputs/
 - ✅ F3 新建会话（FAB；优先带 `workspaceId` 挂载到所选工作区——桌面侧边栏按挂载分组，仅传 cwd 会落到"未分组"；无工作区 id 时回退 cwd）
 - ✅ F4 聊天消息列表（Markdown，user/assistant 分列）
 - ✅ F5 逐字渲染（45ms 步进 displayLen）
-- ✅ F6 实时流（WS mux + 重连 + inspect 轮询兜底 + seq 水位）
+- ✅ F6 实时流（WS mux + 重连 + session/page 尾部兜底 + seq 水位）
 - ✅ F7 公式渲染（Markwon + JLaTeXMath）
 - ✅ F8 思考折叠（reasoning 块 / reasoning-delta 累积）
 - ✅ F9 工具调用折叠（tool/call + tool/result + tool-call-delta）
@@ -113,7 +134,7 @@ JDK 17 + Android SDK（local.properties 指向）。输出：`app/build/outputs/
 - ✅ F12 切换模型（modelCatalog + selectModel + reasoningEffort）
 - ✅ F13 滚动策略（首进到底；nearBottom < 80px 才跟随）
 - ✅ F14 长消息折叠（截断正文，按钮在正文之外）
-- ✅ F15 智能体预设切换（插话模式旁新增预设按钮，点击展开圆形矩阵弹层；模型/工作区菜单改圆角矩形。名单两通道都支持：核心 `agentPresets/list`、插件 `agentPreset.list`。草稿态记住选择、首发消息随 `session/create` 的 `agentPreset` 下发；已有会话仅核心通道可走 `agentPresets/select` 切换（会话开始后宿主拒绝：agent-preset-locked），插件通道提示不可用）
+- ✅ F15 智能体预设切换（插话模式旁新增预设按钮，点击展开圆形矩阵弹层；模型/工作区菜单改圆角矩形。名单走核心 `agentPresets/list`；0.3.12 起两通道等价，已有会话经 `agentPresets/select` 切换（会话开始后宿主拒绝：agent-preset-locked）。草稿态记住选择、首发消息随 `session/create` 的 `agentPreset` 下发）
 - ⏳ 待办：历史分页加载更早消息（session/page）、workspace/follow 工作区分组、附件取回（session/attachment 渲染历史图片）、$events 流驱动会话列表实时刷新、消息重发/编辑队列（updateQueue）、深链/快捷入口。
 
 ## 6. 已知风险
@@ -121,7 +142,8 @@ JDK 17 + Android SDK（local.properties 指向）。输出：`app/build/outputs/
 - `LatexPlugin` 极宽公式在 TextView 内不可横向滚动（v1 接受；后续可换 Compose 原生分段渲染）。
 - frp 隧道需放行 WebSocket（Upgrade）与 Host 门禁白名单（桌面端 trustedHosts 需包含公网域名）。
 - `session/list` 的 cursor 目前宿主忽略（全量返回），大会话量时列表可能较长。
-- WS 断线期间的事件由 `session/inspect` 全量补齐（幂等，水位去重），长会话下流量偏大；后续可换 `session/page` 增量。
+- WS 断线期间的事件由 `session/page` 拉日志尾部补齐（幂等，水位去重），maxMessages 限 250。实测宿主对 `throughSeq` 超出日志 cursor 直接报错（"session page through seq … is past cursor …"），不钳位——因此兜底先经 `session/list` 取 `projections.asOfSeq`（随事件推进、恒 ≤ cursor）作 throughSeq，asOfSeq ≤ 当前水位时跳过。
+- **已核实移除的端点（0.3.12 cohort）**：`session/inspect`。已核实存在的 session 面：list、create、prompt、cancel、selectModel、modelCatalog、search、page、follow、fork、rename、updateQueue、attachment、control（typert face 枚举自 `@deepseek-ai/dsh-api-session-controller`）。
 - `agentPresets/select` 的 `agentId` 是 lookup 参数，要求会话在宿主侧处于 live 状态；宿主重启后未恢复的空白会话切换预设会报 lookup-not-found（重进会话即恢复）。插件 BFF 白名单只有 `agentPreset.list`：已有会话切换预设在插件通道不可用（提示走新建对话）。
 
 ## 7. 调试与踩坑记录（AI 维护者 / 新维护者必读）
@@ -156,8 +178,35 @@ adb shell input keyevent KEYCODE_WAKEUP # 熄屏时先唤醒（授权弹窗掉�
   `inlinesEnabled(true)` + `normalizeMath()`（单个 `$…$` 归一为 `$$…$$`，已成对 `$$` 块先占位保护）解决，
   见 `MarkdownText.kt`。注意 `JLatexMathPlugin.Builder.build()` 返回 **Config**，要用
   `JLatexMathPlugin.create(config)` 包装。
-- **流式输出抽搐**：打字机每 45ms 全文重解析会让每条 LaTeX 公式反复"归零→渲染→撑开"，且会截断
-  半截公式。含 `$` 的流式消息必须跳过打字机直接渲染全文（`AssistantBubble`），纯文本才保留。
+- **流式输出抽搐（LaTeX）**：打字机每 45ms 全文重解析会让每条 LaTeX 公式反复"归零→渲染→撑开"，且会截断
+  半截公式。现行修法是 `MarkdownText.kt` 的公式 drawable LRU 缓存 + `stabilizeLatex` 同步回填
+  （00a1503），打字机全程保留；更早的"含 `$` 跳过打字机"方案已废弃。
+- **流式输出抽搐（表格，1.0.2 引入）**：`TablePlugin` 的 `TableRowSpan` 每次重建 span 都要经历
+  "零宽首帧（`getSize` 返回初始 width=0）→ draw 中 `invalidator.invalidate()` → 二次布局撑开"，
+  且表格 span 无法像公式 drawable 那样缓存——45ms 打字机下每秒塌缩-撑开二十余次。修法
+  （`MarkdownText.kt`，渐进分段渲染）：`splitAtLastTableRow` 把最后一个**已完成表格行**之前的内容
+  划为稳定前缀——前缀字符串在下一行完成前不变，Compose 跳过 `MarkdownText` 重组、不 `setMarkdown`，
+  表格零闪烁地**逐行生长**；正在输入的尾行走打字机 + `neutralizeTablesForStreaming`（分隔行零宽
+  前缀，保持段落形态），行完成即并入前缀。围栏代码块内的竖线行不算表格行，开着的围栏整体留在尾部。
+  注意：只中和"开放中"的表格是不够的——表格关闭后若整条消息仍单 TextView 重解析，关掉的表格
+  每个 45ms 步照样重建 span 抽搐，所以分段一旦开始就贯穿到 turn/end。围栏内竖线行可能导致
+  代码块流式期间短暂分段，完成后收敛。塌缩帧本身曾引发滚动 bug（"自动跳到表格开头"）：
+  行完成重建 span → 首帧塌缩 → 条目高度抖动一个表高 → LazyColumn 锚点失步后 `nearBottom`
+  变 false、跟随钉底停用，视口卡在表格区域。修法：`stabilizeTables` 在 setMarkdown 后、布局前
+  反射预播种 `TableRowSpan`（写入真实文本宽度 + 提前 `makeNewLayouts`），首次布局即得正确尺寸、
+  彻底消除塌缩帧；Markwon 已归档冻结故反射结构稳定，异常一律降级回两遍布局。
+  **播种的宽度来源必须是组合期约束（BoxWithConstraints + fillMaxWidth），不能用 `tv.width`**：
+  消息条目滚出视口再滚回来时 TextView 重建，首帧 `tv.width == 0` → 播种被跳过 → 塌缩帧在
+  "滚动重进"路径全面回归，条目高度边滚边变，视口被弹飞（1.0.2 实际踩过）。fillMaxWidth 同时
+  消除了 TextView 按内容反推宽度的不确定性（表格 span getSize 返回 0 时会拖拽 wrap 宽度）。
+  测试见 `MarkdownTextTest`（含 commonmark 端到端：前缀解析出 TableBlock、中和尾不再解析出）。
+- **Compose 陷阱：LaunchedEffect 捕获 `remember(key)` 的旧状态**：打字机尾部加 `resetKey`（行并入
+  前缀时整体重置 displayLen）后出现过"表格输出完正文失去打字机、整段跳变"——原因是 `displayLen`
+  写成 `remember(resetKey) {...}` 而效果只以 `pending` 为 key：key 变化新建了 State，但仍在运行的
+  协程闭包捕获的是**旧 State**，步进全写进无人读取的旧对象，UI 读的新对象永远停在重置值。
+  修法：`LaunchedEffect(pending, resetKey)` 让效果随状态一起重启（`TypewriterMarkdown`）。
+  凡是 effect 闭包要写、UI 又要读的状态，effect 的 key 必须覆盖该状态的 remember key。
+- **"unexpected scheme: wss"（OkHttp 坑，1.0.3 修复）**：OkHttp 4 的 `HttpUrl.Builder.scheme()` 只接受 http/https，`scheme("wss")` 直接抛 `IllegalArgumentException`——WS 从未真正发出过（实时流一直在靠轮询兜底）。OkHttp 的正确用法是给 `newWebSocket` 传 **http/https URL**（https 连接自动按 wss 升级握手），不要手改 scheme。
 - **自动跟随**：`nearBottom` 必须算"视口末端到列表末端剩余距离"（`last.offset+last.size-viewEnd`）。
   老写法 `viewportEnd-last.size` 在长消息内部滚动时为负值被误判为贴底，导致每个 chunk 把视图拽到最底部。
   跟随滚动用大偏移 `scrollToItem(lastIndex, 1_000_000)` 钉底——offset=0 会把长消息**顶部**弹进视口。
