@@ -65,7 +65,9 @@ fun MarkdownText(
                 TextView(ctx).apply {
                     movementMethod = LinkMovementMethod.getInstance()
                     textSize = 16f
-                    setLineSpacing(0f, 1.15f)
+                    // Kimi 风格行距：字号 16sp × 默认字体行高 ≈ 1.17 → 倍率 1.4
+                    // 约合 1.63×字号，比默认 1.15 明显疏朗；打字机与成稿共用此视图。
+                    setLineSpacing(0f, 1.4f)
                     setPadding(0, 2, 0, 2)
                 }
             },

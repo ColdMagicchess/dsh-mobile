@@ -606,7 +606,7 @@ private fun UserBubble(m: ChatMessage) {
                 Text("[图片 ×${m.imageCount}]", fontSize = 12.sp, color = Flat.Label)
             }
             if (m.text.isNotBlank()) {
-                Text(m.text, fontSize = 15.sp, lineHeight = 22.sp, color = Flat.Ink)
+                Text(m.text, fontSize = 15.sp, lineHeight = 24.sp, color = Flat.Ink)
             }
         }
     }
