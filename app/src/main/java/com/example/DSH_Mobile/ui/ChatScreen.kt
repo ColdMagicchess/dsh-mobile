@@ -117,6 +117,7 @@ import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import com.example.DSH_Mobile.dsh.AgentPresetRow
@@ -221,15 +222,17 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
         withFrameNanos { }
         val wants = captureWantsOpen
         captureActive = false
+        // GPU 回读 + 百万像素拷贝/采样挪到 Default 线程，消除点击后的主线程卡顿
         val ok = runCatching {
             withTimeout(1500) {
-                val img = drawerLayer.toImageBitmap()
-                val hard = img.asAndroidBitmap()
-                // toImageBitmap 返回 HARDWARE 位图，getPixels 不可用：拷成软件 ARGB_8888 再采样
-                val bmp = if (hard.config == Bitmap.Config.HARDWARE)
-                    hard.copy(Bitmap.Config.ARGB_8888, false) ?: hard
-                else hard
-                fx.build(bmp)
+                val hard = drawerLayer.toImageBitmap().asAndroidBitmap()
+                withContext(Dispatchers.Default) {
+                    // toImageBitmap 返回 HARDWARE 位图，getPixels 不可用：拷成软件 ARGB_8888 再采样
+                    val bmp = if (hard.config == Bitmap.Config.HARDWARE)
+                        hard.copy(Bitmap.Config.ARGB_8888, false) ?: hard
+                    else hard
+                    fx.build(bmp)
+                }
             }
         }.getOrDefault(false)
         if (!ok) {
@@ -255,6 +258,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
             animT = t
         }
         animT = dur
+        fx.release()
         dPhase = if (converging) DrawerPhase.Open else DrawerPhase.Closed
     }
     // 宿主生成标题后同步刷新列表
@@ -547,7 +551,9 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
             // ---------- 粒子层：弹出=从左向右汇聚，收起=从右向左消散 ----------
             if (dPhase == DrawerPhase.Converging || dPhase == DrawerPhase.Dispersing) {
                 Canvas(Modifier.fillMaxSize()) {
-                    fx.draw(this, dPhase == DrawerPhase.Converging, animT)
+                    val converging = dPhase == DrawerPhase.Converging
+                    fx.drawPanel(this, converging, animT)   // 清晰面板（渐显/侵蚀）垫底
+                    fx.draw(this, converging, animT)       // 粒子流覆盖其上
                 }
             }
 
