@@ -22,6 +22,7 @@ build/
 
 # scratch/debug leftovers, never publish
 undefined/
+.shots/
 
 # local artifacts that must never be published
 *.apk
