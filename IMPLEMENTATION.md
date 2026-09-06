@@ -13,6 +13,9 @@
 | Markdown | Markwon core + ext-latex（JLaTeXMath Android 版） |
 | LaTeX | `$...$` / `$$...$$` 由 Markwon LatexPlugin 在 TextView 内渲染（F7）；行内公式居中与超宽缩放见 CenteredInlineLatexSpan，点按全屏查看 |
 | 代码高亮 | `ui/CodeHighlight.kt`：自实现 Markwon `SyntaxHighlight` 接口（29 种语言规则表 + generic 回退，`none` 不着色），语言感知正则分词 + LRU(256) 缓存；**不引入 prism4j/prism4j-bundler**（理由见 §7.3） |
+| 毛玻璃 | Haze 1.6.10（`ui/Glass.kt`）：API31+ RenderEffect / API30 RenderScript 双路径背景模糊；统一质感 = 白 25% 着色 + 发丝描边 + 顶部内高光；采不到背景的独立窗口（Popup/Dialog）退化为纯着色同视觉 |
+| 粒子转场 | `ui/DrawerParticles.kt`（DrawerFx）：抽屉面板 `GraphicsLayer.record` 录制 → `toImageBitmap` 位图采样（~1.07 万粒子，网格步长自适应）→ Canvas 参数化动画；弹出从左向右汇聚、收起从右向左消散，支持中途反向 |
+| Compose BOM | 2025.09.01（Compose 1.9.2 / Material3 1.4.0）——GraphicsLayer 录制/读回需 ≥1.8；material3 1.4 起不再传递依赖 material-icons-core，已显式声明（BOM 钉 1.7.8） |
 | 存储 | DataStore + AndroidKeyStore AES-256/GCM 加密配对 cookie |
 | 图片 | Photo Picker（PickMultipleVisualMedia）→ 校验 mediaType/大小 → base64（无前缀）→ session/prompt content |
 | 架构 | ViewModel + StateFlow + Coroutines；MessageStore 折叠事件流 |
@@ -102,7 +105,9 @@ app/src/main/java/com/example/DSH_Mobile/
     ├── ChatScreen.kt          # 消息列表 + 滚动策略(F13) + 长消息折叠(F14) + 输入栏 + 模型弹窗
     ├── MarkdownText.kt        # Markwon+LaTeX(F7) + 打字机(F5: 45ms, step=max(1,min(9,ceil(remain/12))))
     │                          #   + 行内公式居中/超宽缩放 + 点按公式全屏查看器 + normalizeMath 宏清洗
-    └── CodeHighlight.kt       # 代码块语法高亮：SimpleSyntaxHighlight + CodeHighlightPlugin（见 §7.3）
+    ├── CodeHighlight.kt       # 代码块语法高亮：SimpleSyntaxHighlight + CodeHighlightPlugin（见 §7.3）
+    ├── Glass.kt               # 毛玻璃统一质感层（白 25% + 描边 + 高光，可选 Haze 真模糊）
+    └── DrawerParticles.kt     # 抽屉粒子汇聚/消散引擎（DrawerFx）
 app/src/main/java/io/noties/markwon/ext/latex/CenteredInlineLatexSpan.kt
                                # 同包继承包私有上游类：行内公式视觉中心对齐 + 按可用宽等比缩小
 app/src/test/java/com/example/DSH_Mobile/MessageStoreTest.kt  # fold 逻辑单元测试
@@ -141,6 +146,8 @@ JDK 17 + Android SDK（local.properties 指向）。输出：`app/build/outputs/
 - ✅ F14 长消息折叠（截断正文，按钮在正文之外）
 - ✅ F15 智能体预设切换（插话模式旁新增预设按钮，点击展开圆形矩阵弹层；模型/工作区菜单改圆角矩形。名单走核心 `agentPresets/list`；0.3.12 起两通道等价，已有会话经 `agentPresets/select` 切换（会话开始后宿主拒绝：agent-preset-locked）。草稿态记住选择、首发消息随 `session/create` 的 `agentPreset` 下发）
 - ✅ 代码块语法高亮（`ui/CodeHighlight.kt`：`SimpleSyntaxHighlight` 实现 Markwon `SyntaxHighlight` 接口，29 种语言规则表（kotlin/java/python/js/ts/c/cpp/csharp/go/rust/sql/bash/yaml/toml/json/properties/ini/makefile/dockerfile/perl/ruby/swift/dart/php/powershell/r/css/html/xml）+ generic 回退；`CodeHighlightPlugin` 注册进 `buildMarkwon`；配色针对浅色聊天面调校）
+- ✅ 全局毛玻璃质感（所有按钮/胶囊/抽屉：白 25% + Haze 真模糊或退化着色，见 Glass.kt；原白字按钮改墨色保证可读）
+- ✅ 抽屉粒子转场（ChatScreen 状态机 DrawerPhase：Closed→录制采样→Converging→Open→录制采样→Dispersing；右滑/按钮/遮罩统一走 reqOpen/reqClose；录制失败自动回退瞬时开合）
 - ⏳ 待办：历史分页加载更早消息（session/page）、workspace/follow 工作区分组、附件取回（session/attachment 渲染历史图片）、$events 流驱动会话列表实时刷新、消息重发/编辑队列（updateQueue）、深链/快捷入口。
 
 ## 6. 已知风险
@@ -218,6 +225,10 @@ adb shell input keyevent KEYCODE_WAKEUP # 熄屏时先唤醒（授权弹窗掉�
 - **`\lvert` 公式渲染失败（1.0.3 修复）**：JLaTeXMath 不支持 AMS 定界宏 `\lvert`/`\rvert`（以及 `\lVert`/`\rVert`），含这些宏的整条公式解析失败无法渲染。修法：`normalizeMath` 开头先做宏清洗（`UNSUPPORTED_LATEX_MACROS` 表：`\lvert`/`\rvert` → `|`，`\lVert`/`\rVert` → `\Vert`），再做定界符归一化。后续遇到其他渲染失败的宏（如 `\middle`）按同表扩展。
 - **代码高亮为什么不用 Prism4j（1.0.3 决策）**：Markwon 官方 syntax 扩展硬绑 prism4j，其语法文件需要 prism4j-bundler 注解处理器代码生成（给构建链加一层）；且通用规则集存在"首字母大写猜类型"式的臆测着色，在注释/字符串里也会上色，产生误导。改为自实现 `SyntaxHighlight` 接口：每种语言自带关键词表/注释定界/字面量表，**只给确定属于该语言的 token 上色**，未知语言退到保守最小集（if/else/for/while/return/function/class/import/new + 字符串/数字/`//`/`/* */`），`none` 完全不着色。分词是单条合并正则（注释|字符串|数字|字面量|关键词，交替顺序即优先级，字符串/注释内的关键词天然被整段吞掉）。高亮结果按 `lang+code` 走 LRU(256) 缓存，滚动回收重建不重复分词；每语言的 master 正则另有编译缓存。
 - **调试技巧（MuMu 模拟器）**：多设备时 adb 命令必须 `-s 127.0.0.1:16384`（MuMu 12；7555/5555 同实例别名）；MIUI 真机的 ADB 安装会被「USB 安装提示」弹窗限制（10s 自动拒绝，勾选过"不再提示"则静默失败 `INSTALL_FAILED_USER_RESTRICTED`），绕过方式 = 推 APK 到 `/sdcard/Download` 手动安装；`input text` 的空格用 `%s`、`$` 用 `\$`、反斜杠经两层 shell 要写四条；PowerShell 的 `>` 重定向会损坏二进制截图，必须 screencap+pull。
+- **GraphicsLayer 录制的三个坑（1.0.4 粒子抽屉）**：① 必须用 **ContentDrawScope 扩展** `layer.record(size){ drawContent() }`（density/layoutDirection 隐式取自作用域）；直接调成员版 `record(density, layoutDirection, size){}` 时块内 drawContent 画的是**屏幕画布**，layer 是空的（toImageBitmap 全透明）。② `toImageBitmap()` 返回 **HARDWARE** 配置位图，`getPixels` 直接抛 IllegalStateException——先 `copy(ARGB_8888, false)` 拷成软件位图再采样。③ 1.9 里 `rememberGraphicsLayer` 在 `androidx.compose.ui.graphics`（不是 layer 子包）；record 参数解析有接收者作用域陷阱：裸 `density` 会误配到 GraphicsLayer.density(Float)。
+- **常驻隐藏层吞点击（1.0.4 事故）**：抽屉改为常驻组合（粒子相位需要可随时录制）后，**全屏遮罩 Box 的 disabled clickable 仍会吞点击**、抽屉面板盖住屏幕左 74%——症状是所有按钮失灵但无崩溃。修法：遮罩仅 `dPhase != Closed` 时组合；抽屉内容仅 `Open || captureActive` 时组合（空 Box 不吃命中）。教训：Compose 里"不可见"≠"不可交互"，跳过绘制不阻止命中测试。
+- **LaunchedEffect 的 key 不能在体内清零**：`LaunchedEffect(flag){ ...; flag = false }` 改 key 会**取消正在执行的自身协程**（后续代码不跑，状态机卡死且无异常）。用只增计数（captureSeq++）当 key，另设非 key 开关（captureActive）供绘制层读取。
+- **Compose BOM 升级路线（2025.01.00 → 2025.09.01）**：GraphicsLayer 录制/读回 API 需要 Compose ≥1.8；BOM 2025.10+/2026.x 的产物要求 compileSdk 37，超出 AGP 8.13.2 上限（checkAarMetadata 直接失败），2025.09.01（ui 1.9.2）是当前工具链可用最高档。material3 1.4 起不再传递 material-icons-core，`Icons.Filled.*` 需显式声明依赖。
 - **自动跟随**：`nearBottom` 必须算"视口末端到列表末端剩余距离"（`last.offset+last.size-viewEnd`）。
   老写法 `viewportEnd-last.size` 在长消息内部滚动时为负值被误判为贴底，导致每个 chunk 把视图拽到最底部。
   跟随滚动用大偏移 `scrollToItem(lastIndex, 1_000_000)` 钉底——offset=0 会把长消息**顶部**弹进视口。

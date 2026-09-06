@@ -15,8 +15,8 @@ android {
         applicationId = "com.example.DSH_Mobile"
         minSdk = 30
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.0.3-remote312"
+        versionCode = 6
+        versionName = "1.0.4-glass-particle"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -65,6 +65,8 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
     implementation(libs.compose.foundation)
+    // material3 1.4 起不再传递 icons-core；Icons.Filled.* 需要显式声明（BOM 钉 1.7.8）
+    implementation(libs.compose.material.icons.core)
     implementation(libs.okhttp)
     implementation(libs.okhttp.sse)
     implementation(libs.kotlinx.serialization.json)
@@ -73,6 +75,7 @@ dependencies {
     implementation(libs.markwon.ext.latex)
     implementation(libs.markwon.ext.tables)
     implementation(libs.datastore.preferences)
+    implementation(libs.haze) // 毛玻璃：真实背景模糊（RenderEffect/RenderScript 双路径）
 
     debugImplementation(libs.compose.ui.tooling)
 

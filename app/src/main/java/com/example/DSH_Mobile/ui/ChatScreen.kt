@@ -1,5 +1,6 @@
 package com.example.DSH_Mobile.ui
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.text.format.DateUtils
 import android.util.Base64
@@ -101,8 +102,22 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.foundation.Canvas
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.withFrameMillis
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.graphics.asAndroidBitmap
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import com.example.DSH_Mobile.dsh.AgentPresetRow
 import com.example.DSH_Mobile.dsh.ImageRef
@@ -151,12 +166,39 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
     val draftPreset by vm.draftPreset.collectAsState()
 
     var input by rememberSaveable { mutableStateOf("") }
-    var drawerOpen by rememberSaveable { mutableStateOf(false) }
-    val slide by animateFloatAsState(
-        if (drawerOpen) 1f else 0f,
-        spring(dampingRatio = 0.82f, stiffness = 420f),
-        label = "drawer-slide",
-    )
+    // 抽屉粒子转场状态机：Closed →(录制采样)→ Converging → Open →(录制采样)→ Dispersing → Closed
+    var dPhase by remember { mutableStateOf(DrawerPhase.Closed) }
+    var animT by remember { mutableFloatStateOf(0f) }
+    var animEpoch by remember { mutableIntStateOf(0) }
+    var captureSeq by remember { mutableIntStateOf(0) }      // 录制触发计数（effect key，只增不减）
+    var captureActive by remember { mutableStateOf(false) }  // 录制开关（非 key，effect 内可安全关闭）
+    var captureWantsOpen by remember { mutableStateOf(true) }
+    val drawerLayer = rememberGraphicsLayer()
+    val fx = remember { DrawerFx() }
+
+    fun reqOpen() {
+        when (dPhase) {
+            DrawerPhase.Closed -> { captureWantsOpen = true; captureActive = true; captureSeq++ }
+            // 中途反向：粒子当前位置快照为汇聚起点，无需重新录制
+            DrawerPhase.Dispersing -> {
+                fx.setupConverge(fromCurrent = true, curT = animT)
+                dPhase = DrawerPhase.Converging; animEpoch++
+            }
+            else -> {}
+        }
+    }
+    fun reqClose() {
+        when (dPhase) {
+            DrawerPhase.Open -> { captureWantsOpen = false; captureActive = true; captureSeq++ }
+            DrawerPhase.Converging -> {
+                fx.setupDisperse(fromCurrent = true, curT = animT)
+                dPhase = DrawerPhase.Dispersing; animEpoch++
+            }
+            else -> {}
+        }
+    }
+
+    val haze = rememberHazeState()   // 聊天内容作为毛玻璃的背景源
 
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(error) {
@@ -165,9 +207,55 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
             vm.dismissError()
         }
     }
-    // 抽屉打开即刷新（新会话/改名即时可见）
-    LaunchedEffect(drawerOpen) {
-        if (drawerOpen) appVm.refreshSessions()
+    // 抽屉弹出即刷新（新会话/改名在粒子飞行期间就位，收束完成即可见）
+    LaunchedEffect(dPhase) {
+        if (dPhase == DrawerPhase.Converging) appVm.refreshSessions()
+    }
+
+    // 等一帧让抽屉 drawWithContent 完成录制 → 位图采样粒子 → 启动动画。
+    // 注意：开关状态不能做本 effect 的 key（体内清开关会改 key 自杀），
+    // 用只增计数 captureSeq 触发，captureActive 仅作绘制层读取的开关。
+    LaunchedEffect(captureSeq) {
+        if (captureSeq == 0) return@LaunchedEffect
+        withFrameNanos { }
+        withFrameNanos { }
+        val wants = captureWantsOpen
+        captureActive = false
+        val ok = runCatching {
+            withTimeout(1500) {
+                val img = drawerLayer.toImageBitmap()
+                val hard = img.asAndroidBitmap()
+                // toImageBitmap 返回 HARDWARE 位图，getPixels 不可用：拷成软件 ARGB_8888 再采样
+                val bmp = if (hard.config == Bitmap.Config.HARDWARE)
+                    hard.copy(Bitmap.Config.ARGB_8888, false) ?: hard
+                else hard
+                fx.build(bmp)
+            }
+        }.getOrDefault(false)
+        if (!ok) {
+            // 兜底：录制失败/超时直接切换目标态（无粒子效果，功能不受影响）
+            dPhase = if (wants) DrawerPhase.Open else DrawerPhase.Closed
+            return@LaunchedEffect
+        }
+        if (wants) fx.setupConverge(fromCurrent = false, curT = 0f)
+        else fx.setupDisperse(fromCurrent = false, curT = 0f)
+        dPhase = if (wants) DrawerPhase.Converging else DrawerPhase.Dispersing
+        animEpoch++
+    }
+
+    // 逐帧驱动：animT 仅被绘制层读取（不触发重组），播完切换终态
+    LaunchedEffect(animEpoch) {
+        if (animEpoch == 0 || fx.n == 0) return@LaunchedEffect
+        val converging = dPhase == DrawerPhase.Converging
+        val dur = if (converging) fx.tConverge else fx.tDisperse
+        val start = withFrameMillis { it }
+        var t = 0f
+        while (t < dur) {
+            t = (withFrameMillis { it } - start) / 1000f
+            animT = t
+        }
+        animT = dur
+        dPhase = if (converging) DrawerPhase.Open else DrawerPhase.Closed
     }
     // 宿主生成标题后同步刷新列表
     LaunchedEffect(liveTitle) {
@@ -199,11 +287,10 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
     ) {
         BoxWithConstraints(Modifier.fillMaxSize().background(Flat.White)) {
             val drawerW = maxWidth * 0.74f
-            val drawerWpx = with(LocalDensity.current) { drawerW.toPx() }
 
             // ---------- 聊天主体 ----------
             Surface(
-                Modifier.fillMaxSize(),
+                Modifier.fillMaxSize().hazeSource(haze),
                 color = Flat.White,
                 contentColor = Flat.Ink,
             ) {
@@ -214,7 +301,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                     messages = messages,
                     isDraftEmpty = session == null && messages.isEmpty(),
                     modifier = Modifier.weight(1f),
-                    onSwipeToOpen = { drawerOpen = true },
+                    onSwipeToOpen = { reqOpen() },
                 )
                 InputBar(
                     input = input,
@@ -250,12 +337,12 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                FloatCircle(onClick = { drawerOpen = true }) {
+                FloatCircle(onClick = { reqOpen() }, haze = haze) {
                     Icon(MenuLines, contentDescription = "更多", tint = Flat.Ink, modifier = Modifier.size(20.dp))
                 }
                 Box {
                     var modelMenu by remember { mutableStateOf(false) }
-                    FloatPill(onClick = { vm.loadCatalog(); modelMenu = true }) {
+                    FloatPill(onClick = { vm.loadCatalog(); modelMenu = true }, haze = haze) {
                         Text(
                             modelLabel ?: "选择模型",
                             fontSize = 13.sp,
@@ -327,7 +414,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                 }
                 Box {
                     var wsMenu by remember { mutableStateOf(false) }
-                    FloatPill(onClick = { wsMenu = true }) {
+                    FloatPill(onClick = { wsMenu = true }, haze = haze) {
                         Text(
                             wsLabel,
                             fontSize = 13.sp,
@@ -384,48 +471,84 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
 
             // ---------- 会话标题：已并入内容列 ----------
 
-            // ---------- 遮罩 ----------
-            if (slide > 0.001f) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.13f * slide))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            enabled = slide > 0.5f,
-                        ) { drawerOpen = false },
-                )
+            // ---------- 遮罩（透明度跟随粒子进度，绘制阶段读取、不触发重组）。
+            // 仅非 Closed 时组合：常驻的全屏 disabled clickable 会吞点击 ----------
+            if (dPhase != DrawerPhase.Closed) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .drawBehind {
+                        val pr = when (dPhase) {
+                            DrawerPhase.Open -> 1f
+                            DrawerPhase.Converging -> (animT / fx.tConverge).coerceIn(0f, 1f)
+                            DrawerPhase.Dispersing -> 1f - (animT / fx.tDisperse).coerceIn(0f, 1f)
+                            DrawerPhase.Closed -> 0f
+                        }
+                        if (pr > 0.002f) drawRect(Color.Black.copy(alpha = 0.13f * pr))
+                    }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        enabled = dPhase == DrawerPhase.Open,
+                    ) { reqClose() },
+            )
             }
 
-            // ---------- 对话记录抽屉 ----------
+            // ---------- 对话记录抽屉（粒子相位隐藏真实面板，由粒子层接管画面） ----------
+            val drawerShape = RoundedCornerShape(topEnd = 18.dp, bottomEnd = 18.dp)
             Box(
                 Modifier
                     .fillMaxHeight()
                     .width(drawerW)
-                    .offset { IntOffset(((slide - 1f) * drawerWpx).toInt(), 0) }
-                    .shadow(16.dp, RoundedCornerShape(topEnd = 18.dp, bottomEnd = 18.dp), clip = false)
-                    .clip(RoundedCornerShape(topEnd = 18.dp, bottomEnd = 18.dp))
-                    .background(Flat.White),
+                    .drawWithContent {
+                        val scope = this
+                        if (captureActive) {
+                            // 把整块面板（含毛玻璃背景）录制进图形层，供粒子位图采样。
+                            // 显式 scope. 前缀：record 的参数解析会把裸 density 误配到
+                            // GraphicsLayer.density(Float) 上（Kotlin 接收者作用域陷阱），
+                            // 且 1.9 的 record 形参序是 (density, layoutDirection, size)。
+                            // ContentDrawScope.record 扩展：录制期间把本作用域画布
+                            // 重定向进图形层，drawContent() 才会真正落进 layer
+                            // （直接调 GraphicsLayer.record 会把内容画到屏幕画布，layer 为空）
+                            drawerLayer.record(
+                                IntSize(scope.size.width.toInt(), scope.size.height.toInt()),
+                            ) { scope.drawContent() }
+                        }
+                        if (dPhase == DrawerPhase.Open) scope.drawContent()
+                    }
+                    .shadow(16.dp, drawerShape, clip = false)
+                    .clip(drawerShape)
+                    .glass(drawerShape, haze),
             ) {
+                // 非 Open/录制帧时不组合内容：隐藏面板不得拦截屏幕左缘的点击
+                if (dPhase == DrawerPhase.Open || captureActive) {
                 HistoryDrawer(
                     state = appState,
                     currentId = session?.sessionId,
                     onPick = {
                         appVm.openSession(it)
-                        drawerOpen = false
+                        reqClose()
                     },
                     onCreate = {
                         appVm.openDraft()
-                        drawerOpen = false
+                        reqClose()
                     },
-                    onClose = { drawerOpen = false },
+                    onClose = { reqClose() },
                     onSettings = {
+                        // 跳回连接页即刻生效，无需播放消散动画
                         appVm.backToConnect()
-                        drawerOpen = false
+                        dPhase = DrawerPhase.Closed
                     },
                     onArchive = { appVm.archiveSession(it.sessionId) },
                 )
+                }
+            }
+
+            // ---------- 粒子层：弹出=从左向右汇聚，收起=从右向左消散 ----------
+            if (dPhase == DrawerPhase.Converging || dPhase == DrawerPhase.Dispersing) {
+                Canvas(Modifier.fillMaxSize()) {
+                    fx.draw(this, dPhase == DrawerPhase.Converging, animT)
+                }
             }
 
             SnackbarHost(
@@ -447,6 +570,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
 private fun FloatCircle(
     onClick: () -> Unit,
     elevation: androidx.compose.ui.unit.Dp = 10.dp,
+    haze: HazeState? = null,
     content: @Composable () -> Unit,
 ) {
     Box(
@@ -454,7 +578,7 @@ private fun FloatCircle(
             .size(44.dp)
             .shadow(elevation, CircleShape, clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x6B000000))
             .clip(CircleShape)
-            .background(Flat.White)
+            .glass(CircleShape, haze)
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
         content = { content() },
@@ -462,13 +586,13 @@ private fun FloatCircle(
 }
 
 @Composable
-private fun FloatPill(onClick: () -> Unit, content: @Composable () -> Unit) {
+private fun FloatPill(onClick: () -> Unit, haze: HazeState? = null, content: @Composable () -> Unit) {
     Row(
         Modifier
             .height(44.dp)
             .shadow(10.dp, RoundedCornerShape(22.dp), clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x6B000000))
             .clip(RoundedCornerShape(22.dp))
-            .background(Flat.White)
+            .glass(RoundedCornerShape(22.dp), haze)
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
             .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -477,12 +601,12 @@ private fun FloatPill(onClick: () -> Unit, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun MiniPill(text: String, onClick: () -> Unit, icon: ImageVector? = null) {
+private fun MiniPill(text: String, onClick: () -> Unit, icon: ImageVector? = null, haze: HazeState? = null) {
     Row(
         Modifier
             .shadow(8.dp, RoundedCornerShape(16.dp), clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x66000000))
             .clip(RoundedCornerShape(16.dp))
-            .background(Flat.White)
+            .glass(RoundedCornerShape(16.dp), haze)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -817,7 +941,7 @@ private fun ArchiveDialog(target: SessionSummary, onDismiss: () -> Unit, onConfi
                         Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(10.dp))
-                            .background(Flat.Fill)
+                            .glass(RoundedCornerShape(10.dp))
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
@@ -832,7 +956,7 @@ private fun ArchiveDialog(target: SessionSummary, onDismiss: () -> Unit, onConfi
                         enabled = true,
                         modifier = Modifier.weight(1f),
                     ) {
-                        Text("归 档", fontSize = 14.sp, color = Flat.White)
+                        Text("归 档", fontSize = 14.sp, color = Flat.Ink)
                     }
                 }
             }
@@ -946,7 +1070,7 @@ private fun InputBar(
                             .size(44.dp)
                             .shadow(10.dp, CircleShape, clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x6B000000))
                             .clip(CircleShape)
-                            .background(if (enabled) Flat.Accent else Flat.Fill)
+                            .then(if (enabled) Modifier.glass(CircleShape) else Modifier.background(Flat.Fill, CircleShape))
                             .clickable(
                                 enabled = enabled,
                                 interactionSource = remember { MutableInteractionSource() },
@@ -961,7 +1085,7 @@ private fun InputBar(
                             Icon(
                                 Icons.Filled.Send,
                                 contentDescription = "发送",
-                                tint = if (enabled) Color.White else Flat.Muted,
+                                tint = if (enabled) Flat.Ink else Flat.Muted,
                                 modifier = Modifier.size(18.dp),
                             )
                         }
@@ -1154,7 +1278,7 @@ private fun DrawerSessionRow(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(if (selected) Flat.Fill else Color.Transparent)
+            .then(if (selected) Modifier.glass(RoundedCornerShape(8.dp)) else Modifier)
             .combinedClickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -1177,7 +1301,9 @@ private fun DrawerSessionRow(
             s.title?.takeIf { it.isNotBlank() }
                 ?: if (s.blank) "(新会话)" else "(未命名)",
             fontSize = 14.sp,
-            color = if (selected) Flat.Accent else Flat.Ink,
+            // 玻璃选中态上，天蓝细字在模糊背景里可读性差：改墨色加粗表达选中
+            color = Flat.Ink,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
@@ -1192,6 +1318,9 @@ private fun DrawerSessionRow(
 }
 
 /* ==================== 智能体预设弹层 ==================== */
+
+/** 抽屉粒子转场状态机。 */
+private enum class DrawerPhase { Closed, Converging, Open, Dispersing }
 
 private const val PRESET_GRID_COLUMNS = 3
 
@@ -1308,7 +1437,7 @@ private fun PresetCircle(row: AgentPresetRow, selected: Boolean, onClick: () -> 
                 .size(48.dp)
                 .shadow(8.dp, CircleShape, clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x66000000))
                 .clip(CircleShape)
-                .background(if (selected) Flat.Accent else Flat.Fill)
+                .glass(CircleShape)
                 .clickable(
                     enabled = !broken,
                     interactionSource = remember { MutableInteractionSource() },
@@ -1321,7 +1450,7 @@ private fun PresetCircle(row: AgentPresetRow, selected: Boolean, onClick: () -> 
                 Icon(
                     Icons.Filled.Check,
                     contentDescription = null,
-                    tint = Color.White,
+                    tint = Flat.Accent,
                     modifier = Modifier.size(22.dp),
                 )
             } else {

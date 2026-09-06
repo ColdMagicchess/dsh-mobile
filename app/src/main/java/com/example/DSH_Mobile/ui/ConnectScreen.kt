@@ -155,7 +155,7 @@ fun ConnectScreen(state: AppUiState, vm: AppViewModel) {
                     CircularProgressIndicator(
                         Modifier.size(18.dp),
                         strokeWidth = 2.2.dp,
-                        color = androidx.compose.ui.graphics.Color.White,
+                        color = Flat.Ink,
                     )
                     Spacer(Modifier.size(10.dp))
                     Text("连接中…", fontSize = 15.sp, color = Flat.Ink)
@@ -167,7 +167,7 @@ fun ConnectScreen(state: AppUiState, vm: AppViewModel) {
                         color = if (state.busy || host.isBlank() || secret.isBlank()) {
                             Flat.Muted
                         } else {
-                            Flat.White
+                            Flat.Ink
                         },
                     )
                 }

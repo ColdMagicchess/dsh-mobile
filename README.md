@@ -16,6 +16,8 @@ App 只依赖 DSH 的**稳定核心接口**与 [dsh-web-all](#与-dsh-web-all-�
 | ⌨️ **打字机渲染** | 生成中按 45ms 步进显示，滚动回收不重放 |
 | 📐 **LaTeX 公式** | Markwon + JLaTeXMath，行内 `$...$` 与块级 `$$...$$`；公式与文字垂直居中、超宽自动等比缩放、点按公式全屏放大查看（可滚动）|
 | 🎨 **代码高亮** | 自实现 Markwon `SyntaxHighlight`：29 种语言规则表、语言感知分词不误色，注释/字符串/数字/字面量/关键词五色着色 + LRU 缓存，零 Prism4j 构建依赖 |
+| 🧊 **毛玻璃质感** | 全部按钮与侧边抽屉统一白色 25% 毛玻璃（Haze 真实背景模糊 + 发丝描边 + 顶部内高光）|
+| ✨ **粒子抽屉转场** | 鸿蒙 7 风格：弹出=面板录制采样上万粒子**从左向右汇聚**；收起=右缘先碎**向左消散**；支持中途反向打断 |
 | 💬 **对话管理** | 工作区分组、新建、切换、**归档**（长按对话）、桌面端删除自动同步 |
 | 🖼 **图片上传** | Photo Picker → base64 → 随消息发送，本端即时可见 |
 | 🧠 **思考与工具折叠** | reasoning / tool call 可折叠展示 |
@@ -111,6 +113,8 @@ The app talks only to DSH's **stable core API** and the mobile channel of the [d
 - ⌨️ **Typewriter rendering** — 45 ms stepped reveal; scrolling away never replays it
 - 📐 **LaTeX** — Markwon + JLaTeXMath, inline `$...$` and display `$$...$$`; formulas vertically centered with text, oversized ones auto-scaled to fit, tap any formula for a fullscreen scrollable viewer
 - 🎨 **Code highlighting** — a self-implemented Markwon `SyntaxHighlight` with 29 curated language rule sets: language-aware tokenizer (no misleading colors on unknown tokens), comment/string/number/literal/keyword palette, LRU-cached, zero Prism4j build dependency
+- 🧊 **Frosted glass** — every button and the side drawer share a white-25% glass material (real backdrop blur via Haze, hairline border, top inner highlight)
+- ✨ **Particle drawer transition** — HarmonyOS 7 style: opening converges thousands of panel-sampled particles left→right, closing shatters the right edge first and disperses them leftward; mid-flight reversal supported
 - 💬 **Conversations** — workspace grouping, creation, switching, **archiving** (long-press), sync with desktop deletions
 - 🖼 **Image upload** — Photo Picker → base64 → sent with the prompt, visible locally
 - 🧠 **Reasoning & tool-call folding**
