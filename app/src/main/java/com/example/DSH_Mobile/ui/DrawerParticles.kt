@@ -102,7 +102,7 @@ internal class DrawerFx {
         return true
     }
 
-    fun release() { panelBmp = null; panelMode = 0 }
+    fun release() { panelBmp = null; panelMode = 0; settleP = 0f; anchors = null }
 
     private fun nearestSeedDist(x: Float, y: Float): Float {
         var m = Float.MAX_VALUE
@@ -168,36 +168,69 @@ internal class DrawerFx {
         pxy[1] = hy[i] + oy[i] - (15f + rn[i] * 55f) * e + cos(t * 5f + sd[i] * 1.3f) * 8f * k
     }
 
+    /**
+     * 收束后的"落位"子相位（0..1，由 ChatScreen 的驱动协程写入）：
+     * 汇聚完成后位图原样保留并淡出，期间按钮投影从 0 渐显到实值，
+     * 真实抽屉在位图底下完成首绘——所有切换开销被动画吸收，不再"顿"。
+     */
+    var settleP = 0f
+    /** 按钮投影圆心锚点 [x0,y0,x1,y1,...]（抽屉局部 px），由 ChatScreen 计算注入 */
+    var anchors: FloatArray? = null
+    private val haloR = 118f
+
     /** 复用 Paint，避免逐帧分配 */
     private val fadePaint = Paint().apply { isFilterBitmap = true }
+    private val haloPaint = Paint()
+    private val edgePaint = Paint()
     private val wipePaint = Paint().apply {
         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
     }
-    private val shadowEdgePaint = Paint()
-    private val _unit = Unit
     private val holePaint = Paint().apply {
         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
     }
 
-    /** 面板绘制：弹出=整体渐显；收起=三点 DST_OUT 侵蚀。原生 canvas，稳定可控。 */
+    /** 右缘柔影：与真面板 elevation 同观感，alpha 随进度 */
+    private fun drawEdgeShadow(canvas: android.graphics.Canvas, k: Float) {
+        val shW = 72f
+        edgePaint.shader = android.graphics.LinearGradient(
+            wPx - 2f, 0f, wPx + shW, 0f,
+            0x30000000.toInt(), 0x00000000, Shader.TileMode.CLAMP,
+        )
+        edgePaint.alpha = (k * 255f).toInt()
+        canvas.drawRect(wPx - 2f, 0f, wPx + shW, hPx.toFloat(), edgePaint)
+    }
+
+    /** 面板绘制：弹出=显影波 + 落位段；收起=三点 DST_OUT 侵蚀。原生 canvas。 */
     fun drawPanel(scope: DrawScope, converging: Boolean, t: Float) {
         val bmp = panelBmp ?: return
         if (panelMode == 0) return
         run {
             val canvas = scope.drawContext.canvas.nativeCanvas
             if (converging) {
+                val sp = settleP
+                if (sp > 0f) {
+                    // 落位段：位图原样保留并淡出交棒，按钮投影同步渐显到位
+                    drawEdgeShadow(canvas, 1f)
+                    anchors?.let { arr ->
+                        haloPaint.alpha = (sp * 255f).toInt()
+                        var k = 0
+                        while (k + 1 < arr.size) {
+                            haloPaint.shader = RadialGradient(
+                                arr[k], arr[k + 1], haloR,
+                                0x24000000.toInt(), 0x00000000, Shader.TileMode.CLAMP,
+                            )
+                            canvas.drawCircle(arr[k], arr[k + 1], haloR, haloPaint)
+                            k += 2
+                        }
+                    }
+                    fadePaint.alpha = ((1f - sp) * 255f).toInt()
+                    canvas.drawBitmap(bmp, 0f, 0f, fadePaint)
+                    return@run
+                }
                 // 显影波：DST_IN 线性渐变，不透明带在波前左侧，羽化 110px
                 val p = ((t - revealStart) / revealDur).coerceIn(0f, 1f)
                 if (p <= 0f) return@run
-                // 右缘投影先行（录制位图被 saveLayer 裁掉外阴影，切 Open 才"补"出来
-                // 就是那下顿）：这里按显影进度提前铺一条与真阴影同参数的柔影
-                val shW = 72f
-                shadowEdgePaint.shader = android.graphics.LinearGradient(
-                    wPx - 2f, 0f, wPx + shW, 0f,
-                    (0x30000000.toInt()), 0x00000000, Shader.TileMode.CLAMP,
-                )
-                shadowEdgePaint.alpha = (p * 255f).toInt()
-                canvas.drawRect(wPx - 2f, 0f, wPx + shW, hPx.toFloat(), shadowEdgePaint)
+                drawEdgeShadow(canvas, p)
                 val edge = -revealFeather + (wPx + revealFeather * 2f) * p
                 val save = canvas.saveLayer(0f, 0f, wPx.toFloat(), hPx.toFloat(), null)
                 canvas.drawBitmap(bmp, 0f, 0f, null)

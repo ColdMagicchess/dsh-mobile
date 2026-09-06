@@ -34,6 +34,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -172,6 +174,8 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
     var animT by remember { mutableFloatStateOf(0f) }
     var animEpoch by remember { mutableIntStateOf(0) }
     var captureSeq by remember { mutableIntStateOf(0) }      // 录制触发计数（effect key，只增不减）
+    var settleActive by remember { mutableStateOf(false) }   // 收束后的落位段（阴影渐显+位图交棒）
+    var settleEpoch by remember { mutableIntStateOf(0) }
     var captureActive by remember { mutableStateOf(false) }  // 录制开关（非 key，effect 内可安全关闭）
     var captureWantsOpen by remember { mutableStateOf(true) }
     val drawerLayer = rememberGraphicsLayer()
@@ -194,7 +198,10 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
     }
     fun reqClose() {
         when (dPhase) {
-            DrawerPhase.Open -> { captureWantsOpen = false; captureActive = true; captureSeq++ }
+            DrawerPhase.Open -> {
+                settleActive = false; fx.settleP = 0f
+                captureWantsOpen = false; captureActive = true; captureSeq++
+            }
             DrawerPhase.Converging -> {
                 fx.setupDisperse(fromCurrent = true, curT = animT)
                 animT = 0f
@@ -249,6 +256,30 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
         animEpoch++
     }
 
+    // 落位段：300ms 内 settleP 0→1（fx 绘制层读取），锚点=抽屉头部两个圆钮
+    val settleDens = LocalDensity.current
+    val settleInsets = WindowInsets.statusBars   // 扩展属性需组合上下文，提前取
+    LaunchedEffect(settleEpoch) {
+        if (settleEpoch == 0 || !settleActive) return@LaunchedEffect
+        val sbPx = settleInsets.getBottom(settleDens).toFloat()
+        fx.anchors = with(settleDens) {
+            floatArrayOf(
+                fx.wPx - 40.dp.toPx(), sbPx + 36.dp.toPx(),   // 收起 ×
+                fx.wPx - 94.dp.toPx(), sbPx + 36.dp.toPx(),   // 新建 +
+            )
+        }
+        val start = withFrameMillis { it }
+        var u = 0f
+        while (u < 1f && settleActive) {
+            u = (withFrameMillis { it } - start) / 300f
+            fx.settleP = u.coerceIn(0f, 1f)
+            animT = fx.tConverge   // 保持 Canvas 每帧重绘
+        }
+        settleActive = false
+        fx.settleP = 0f
+        fx.release()
+    }
+
     // 逐帧驱动：animT 仅被绘制层读取（不触发重组），播完切换终态
     LaunchedEffect(animEpoch) {
         if (animEpoch == 0 || fx.n == 0) return@LaunchedEffect
@@ -261,8 +292,16 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
             animT = t
         }
         animT = dur
-        fx.release()
-        dPhase = if (converging) DrawerPhase.Open else DrawerPhase.Closed
+        if (converging) {
+            // 位图原样保留，进入落位段：按钮阴影渐显 + 位图淡出交棒，
+            // 真实抽屉在位图底下完成首绘，切换开销全部被动画吸收
+            dPhase = DrawerPhase.Open
+            settleActive = true
+            settleEpoch++
+        } else {
+            fx.release()
+            dPhase = DrawerPhase.Closed
+        }
     }
     // 宿主生成标题后同步刷新列表
     LaunchedEffect(liveTitle) {
@@ -560,7 +599,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
             }
 
             // ---------- 粒子层：弹出=从左向右汇聚，收起=从右向左消散 ----------
-            if (dPhase == DrawerPhase.Converging || dPhase == DrawerPhase.Dispersing) {
+            if (dPhase == DrawerPhase.Converging || dPhase == DrawerPhase.Dispersing || settleActive) {
                 Canvas(Modifier.fillMaxSize()) {
                     val converging = dPhase == DrawerPhase.Converging
                     fx.drawPanel(this, converging, animT)   // 清晰面板（渐显/侵蚀）垫底
