@@ -37,18 +37,21 @@ internal class DrawerFx {
     var step = 8f; private set
     var wPx = 0; private set
     var hPx = 0; private set
-    val tConverge = 0.85f
-    val tDisperse = 0.85f
-    private val wave = 0.38f
-    /** 弹出侧面板整体渐显时长 */
-    private val reveal = 0.16f
+    val tConverge = 1.0f
+    val tDisperse = 1.6f
+    /** 收起：三点侵蚀波扫过全卡的时间（线性匀速，洞缘所到之处才释放粒子） */
+    private val wave = 0.8f
+    /** 弹出：显影波参数——前沿从左扫到右，严格跟随粒子落位波 */
+    private val revealStart = 0.26f
+    private val revealDur = 0.52f
+    private val revealFeather = 110f
 
     /** 面板清晰位图（软件 ARGB_8888，直接 drawBitmap） */
     private var panelBmp: Bitmap? = null
     /** 0=面板退场（反向打断） 1=整体渐显（弹出） 2=DST_OUT 三点侵蚀（收起） */
     var panelMode = 0; private set
 
-    private companion object { const val CAP = 14000; const val TARGET = 13000 }
+    private companion object { const val CAP = 26000; const val TARGET = 24000 }
 
     private val hx = FloatArray(CAP); private val hy = FloatArray(CAP)
     private val col = IntArray(CAP)
@@ -66,7 +69,7 @@ internal class DrawerFx {
     fun build(bmp: Bitmap): Boolean {
         val w = bmp.width; val h = bmp.height
         if (w <= 0 || h <= 0) return false
-        step = maxOf(6f, ceil(sqrt((w * h).toDouble() / TARGET)).toFloat())
+        step = maxOf(5f, ceil(sqrt((w * h).toDouble() / TARGET)).toFloat())
         val si = step.toInt().coerceAtLeast(1)
         val pixels = IntArray(w * h)
         bmp.getPixels(pixels, 0, w, 0, 0, w, h)
@@ -126,8 +129,9 @@ internal class DrawerFx {
             } else {
                 sx[i] = -(40f + rn[i] * 260f)
                 sy[i] = (rn[i] - 0.5f) * 90f
-                dl[i] = (hx[i] / wPx) * 0.26f + rn[i] * 0.08f
-                du[i] = 0.30f + rn[i] * 0.14f
+                // 落位时刻 = dl+du ≈ (x/w)*0.30 + [0.34..0.46]，显影波在其后 ~0.02s 覆盖
+                dl[i] = (hx[i] / wPx) * 0.30f + rn[i] * 0.06f
+                du[i] = 0.34f + rn[i] * 0.12f
             }
         }
     }
@@ -144,8 +148,8 @@ internal class DrawerFx {
                 ox[i] = 0f; oy[i] = 0f
                 dl[i] = seedDelay(i)
             }
-            du[i] = 0.26f + rn[i] * 0.12f
-            fl[i] = 280f + rn[i] * 460f + (wPx - hx[i]) * 0.3f
+            du[i] = 0.55f + rn[i] * 0.25f
+            fl[i] = 320f + rn[i] * 520f + (wPx - hx[i]) * 0.35f
         }
     }
 
@@ -166,6 +170,9 @@ internal class DrawerFx {
 
     /** 复用 Paint，避免逐帧分配 */
     private val fadePaint = Paint().apply { isFilterBitmap = true }
+    private val wipePaint = Paint().apply {
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+    }
     private val holePaint = Paint().apply {
         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
     }
@@ -177,12 +184,24 @@ internal class DrawerFx {
         run {
             val canvas = scope.drawContext.canvas.nativeCanvas
             if (converging) {
-                fadePaint.alpha = (min(t / reveal, 1f) * 255f).toInt()
-                canvas.drawBitmap(bmp, 0f, 0f, fadePaint)
+                // 显影波：DST_IN 线性渐变，不透明带在波前左侧，羽化 110px
+                val p = ((t - revealStart) / revealDur).coerceIn(0f, 1f)
+                if (p <= 0f) return@run
+                val edge = -revealFeather + (wPx + revealFeather * 2f) * p
+                val save = canvas.saveLayer(0f, 0f, wPx.toFloat(), hPx.toFloat(), null)
+                canvas.drawBitmap(bmp, 0f, 0f, null)
+                wipePaint.shader = android.graphics.LinearGradient(
+                    edge - revealFeather, 0f, edge + revealFeather, 0f,
+                    -0x1 /* 0xFFFFFFFF */, 0x0, Shader.TileMode.CLAMP,
+                )
+                canvas.drawRect(0f, 0f, wPx.toFloat(), hPx.toFloat(), wipePaint)
+                canvas.restoreToCount(save)
                 return@run
             }
-            val r = easeOutQuad(min(t / wave, 1f)) * maxReach
-            val edge = r * 0.28f
+            // 线性匀速侵蚀：easeOutQuad 前快后慢，半秒内就吃掉 90% 面板，
+            // 用户只来得及看见"碎掉"看不见"侵蚀"；匀速才看得清洞缘推进
+            val r = min(t / wave, 1f) * maxReach
+            val edge = r * 0.22f
             val save = canvas.saveLayer(0f, 0f, wPx.toFloat(), hPx.toFloat(), null)
             canvas.drawBitmap(bmp, 0f, 0f, null)
             if (r > 0.5f) {
@@ -225,12 +244,14 @@ internal class DrawerFx {
             val base = (col[i] ushr 24) / 255f
             val al = (a * base).coerceIn(0f, 1f)
             if (al <= 0.02f) continue
-            scope.drawRect(
-                Color(0xFF2A2438),
-                topLeft = Offset(x + 1.5f, y + 2.5f),
-                size = Size(sz, sz),
-                alpha = al * 0.15f,
-            )
+            if (al > 0.15f) {
+                scope.drawRect(
+                    Color(0xFF2A2438),
+                    topLeft = Offset(x + 1.5f, y + 2.5f),
+                    size = Size(sz, sz),
+                    alpha = al * 0.15f,
+                )
+            }
             scope.drawRect(Color(col[i]), topLeft = Offset(x, y), size = Size(sz, sz), alpha = al)
         }
     }

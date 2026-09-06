@@ -179,10 +179,14 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
 
     fun reqOpen() {
         when (dPhase) {
-            DrawerPhase.Closed -> { captureWantsOpen = true; captureActive = true; captureSeq++ }
+            DrawerPhase.Closed -> {
+                appVm.refreshSessions()   // 先刷数据再录制，避免位图与收束完成的实时列表不一致
+                captureWantsOpen = true; captureActive = true; captureSeq++
+            }
             // 中途反向：粒子当前位置快照为汇聚起点，无需重新录制
             DrawerPhase.Dispersing -> {
                 fx.setupConverge(fromCurrent = true, curT = animT)
+                animT = 0f   // 清零：否则首帧用上一轮的结束值画出"完成态"闪一下
                 dPhase = DrawerPhase.Converging; animEpoch++
             }
             else -> {}
@@ -193,6 +197,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
             DrawerPhase.Open -> { captureWantsOpen = false; captureActive = true; captureSeq++ }
             DrawerPhase.Converging -> {
                 fx.setupDisperse(fromCurrent = true, curT = animT)
+                animT = 0f
                 dPhase = DrawerPhase.Dispersing; animEpoch++
             }
             else -> {}
@@ -208,10 +213,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
             vm.dismissError()
         }
     }
-    // 抽屉弹出即刷新（新会话/改名在粒子飞行期间就位，收束完成即可见）
-    LaunchedEffect(dPhase) {
-        if (dPhase == DrawerPhase.Converging) appVm.refreshSessions()
-    }
+
 
     // 等一帧让抽屉 drawWithContent 完成录制 → 位图采样粒子 → 启动动画。
     // 注意：开关状态不能做本 effect 的 key（体内清开关会改 key 自杀），
@@ -242,6 +244,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
         }
         if (wants) fx.setupConverge(fromCurrent = false, curT = 0f)
         else fx.setupDisperse(fromCurrent = false, curT = 0f)
+        animT = 0f
         dPhase = if (wants) DrawerPhase.Converging else DrawerPhase.Dispersing
         animEpoch++
     }
