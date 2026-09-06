@@ -173,6 +173,8 @@ internal class DrawerFx {
     private val wipePaint = Paint().apply {
         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
     }
+    private val shadowEdgePaint = Paint()
+    private val _unit = Unit
     private val holePaint = Paint().apply {
         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
     }
@@ -187,6 +189,15 @@ internal class DrawerFx {
                 // 显影波：DST_IN 线性渐变，不透明带在波前左侧，羽化 110px
                 val p = ((t - revealStart) / revealDur).coerceIn(0f, 1f)
                 if (p <= 0f) return@run
+                // 右缘投影先行（录制位图被 saveLayer 裁掉外阴影，切 Open 才"补"出来
+                // 就是那下顿）：这里按显影进度提前铺一条与真阴影同参数的柔影
+                val shW = 72f
+                shadowEdgePaint.shader = android.graphics.LinearGradient(
+                    wPx - 2f, 0f, wPx + shW, 0f,
+                    (0x30000000.toInt()), 0x00000000, Shader.TileMode.CLAMP,
+                )
+                shadowEdgePaint.alpha = (p * 255f).toInt()
+                canvas.drawRect(wPx - 2f, 0f, wPx + shW, hPx.toFloat(), shadowEdgePaint)
                 val edge = -revealFeather + (wPx + revealFeather * 2f) * p
                 val save = canvas.saveLayer(0f, 0f, wPx.toFloat(), hPx.toFloat(), null)
                 canvas.drawBitmap(bmp, 0f, 0f, null)

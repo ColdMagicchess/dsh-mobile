@@ -507,6 +507,13 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                 Modifier
                     .fillMaxHeight()
                     .width(drawerW)
+                    // 组合≠可点：仅在"内容已组合但面板不可见"的预热/录制相位
+                    // 挂 disabled clickable 吞触摸（防隐形列表项截胡）。
+                    // 注意不能反着挂到 Closed——Box 常驻会吃掉菜单按钮的点击！
+                    .then(if (dPhase == DrawerPhase.Converging ||
+                              (captureActive && dPhase != DrawerPhase.Open))
+                          Modifier.clickable(enabled = false) {}
+                          else Modifier)
                     .drawWithContent {
                         val scope = this
                         if (captureActive) {
@@ -527,8 +534,9 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                     .clip(drawerShape)
                     .glass(drawerShape, haze),
             ) {
-                // 非 Open/录制帧时不组合内容：隐藏面板不得拦截屏幕左缘的点击
-                if (dPhase == DrawerPhase.Open || captureActive) {
+                // Open/Converging/录制帧组合内容：Converging 期间预热布局，
+                // 收束完成切 Open 不再出现整树重组的顿帧
+                if (dPhase == DrawerPhase.Open || dPhase == DrawerPhase.Converging || captureActive) {
                 HistoryDrawer(
                     state = appState,
                     currentId = session?.sessionId,
