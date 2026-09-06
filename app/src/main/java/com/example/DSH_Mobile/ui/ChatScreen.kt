@@ -361,6 +361,9 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                                 text = { Text(w.label, fontSize = 14.sp, color = Flat.Ink) },
                                 onClick = {
                                     wsMenu = false
+                                    // 先同步 AppViewModel 的当前会话态（否则 appState.current 仍指向
+                                    // 旧会话，而 ChatViewModel 已重置为草稿 → 页面空白且两态分叉）
+                                    appVm.openDraft()
                                     vm.selectWorkspace(w.path)
                                 },
                                 trailingIcon = {

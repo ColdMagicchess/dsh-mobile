@@ -1,27 +1,56 @@
 package com.example.DSH_Mobile.ui
 
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.drawable.Drawable
+import android.text.Spannable
 import android.text.Spanned
 import android.text.TextPaint
 import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
+import android.util.Log
+import android.view.View
 import android.widget.TextView
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Text
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import io.noties.markwon.Markwon
+import io.noties.markwon.core.MarkwonTheme
+import io.noties.markwon.ext.latex.CenteredInlineLatexSpan
+import io.noties.markwon.ext.latex.JLatexAsyncDrawableSpan
 import io.noties.markwon.ext.latex.JLatexMathPlugin
 import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.ext.tables.TableRowSpan
@@ -32,6 +61,14 @@ import kotlinx.coroutines.delay
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import kotlin.math.ceil
+
+private const val TAG = "DshLatex"
+
+/** 公式全屏查看器的载荷：drawable 副本 + 原始尺寸（px）。 */
+private data class LatexViewerPayload(val drawable: Drawable, val w: Int, val h: Int)
+
+/** 查看器里公式的放大倍率。 */
+private const val VIEWER_SCALE = 1.6f
 
 /**
  * Markdown rendering via Markwon with JLaTeXMath formulas ($...$ and $$...$$).
@@ -59,6 +96,9 @@ fun MarkdownText(
         // TextView 水平 padding 为 0，文本布局宽 = 视图宽 = maxWidth。
         // constraints.maxWidth 即像素值（Constraints 以 px 计）
         val targetWidthPx = if (constraints.hasBoundedWidth) constraints.maxWidth else 0
+        // 点按公式 → 全屏查看器（放大的可滚动视图）
+        var viewer by remember { mutableStateOf<LatexViewerPayload?>(null) }
+        val onFormulaTap: (Drawable, Int, Int) -> Unit = { d, w, h -> viewer = LatexViewerPayload(d, w, h) }
         AndroidView(
             modifier = Modifier.fillMaxWidth(),
             factory = { ctx ->
@@ -81,14 +121,82 @@ fun MarkdownText(
                 markwon.setMarkdown(tv, normalized)
                 stabilizeTables(tv, targetWidthPx)
                 stabilizeLatex(tv)
+                centerInlineLatex(tv, targetWidthPx, onFormulaTap)
+                clickableBlockLatex(tv, onFormulaTap)
             },
         )
+
+        // 公式全屏查看器：1.6 倍放大 + 双向滚动（窄屏看宽公式的后半部分），
+        // 弹出带淡入+上浮动画，避免突兀
+        viewer?.let { p ->
+            Dialog(onDismissRequest = { viewer = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+                val appear = remember(p) { Animatable(0f) }
+                LaunchedEffect(p) {
+                    appear.animateTo(1f, tween(durationMillis = 200, easing = FastOutSlowInEasing))
+                }
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer {
+                            alpha = appear.value
+                            val s = 0.88f + 0.12f * appear.value
+                            scaleX = s
+                            scaleY = s
+                            transformOrigin = TransformOrigin(0.5f, 0f)
+                        }
+                        .background(androidx.compose.ui.graphics.Color(0xFFF7F5EF))
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("公式 · 可滑动查看，点空白处关闭", fontSize = 12.sp, color = Flat.Muted)
+                        Text("关 闭", fontSize = 13.sp, color = Flat.Accent,
+                            modifier = Modifier.clickable { viewer = null })
+                    }
+                    val vScroll = rememberScrollState()
+                    val hScroll = rememberScrollState()
+                    Row(Modifier.verticalScroll(vScroll)) {
+                        Row(Modifier.horizontalScroll(hScroll)) {
+                            AndroidView(
+                                modifier = Modifier.padding(16.dp),
+                                factory = { ctx ->
+                                    object : View(ctx) {
+                                        var p: LatexViewerPayload? = null
+                                        override fun onMeasure(w: Int, h: Int) {
+                                            val pp = p
+                                            setMeasuredDimension(
+                                                ((pp?.w ?: 1) * VIEWER_SCALE).toInt().coerceAtLeast(1),
+                                                ((pp?.h ?: 1) * VIEWER_SCALE).toInt().coerceAtLeast(1),
+                                            )
+                                        }
+                                        override fun onDraw(canvas: Canvas) {
+                                            super.onDraw(canvas)
+                                            val pp = p ?: return
+                                            val save = canvas.save()
+                                            try {
+                                                canvas.scale(VIEWER_SCALE, VIEWER_SCALE)
+                                                pp.drawable.draw(canvas)
+                                            } finally {
+                                                canvas.restoreToCount(save)
+                                            }
+                                        }
+                                    }
+                                },
+                                update = { v -> v.p = p; v.invalidate() },
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 private fun buildMarkwon(context: Context): Markwon =
     Markwon.builder(context)
         .usePlugin(MarkwonInlineParserPlugin.create())
+        .usePlugin(CodeHighlightPlugin())
         .usePlugin(
             JLatexMathPlugin.builder(16f * context.resources.displayMetrics.scaledDensity)
                 .inlinesEnabled(true)
@@ -102,14 +210,41 @@ private fun buildMarkwon(context: Context): Markwon =
 private val DISPLAY_MATH = Regex("\\$\\$([\\s\\S]+?)\\\$\\$")
 private val INLINE_DOLLAR = Regex("(?<!\\$)\\$(?!\\$)((?:\\\\.|[^\$\\\\])+?)\\$(?!\\$)")
 
+/** JLaTeXMath 不支持的 AMS 定界宏 → 等价写法（不替换则整条公式渲染失败）。 */
+private val UNSUPPORTED_LATEX_MACROS = listOf(
+    "\\lvert" to "|",
+    "\\rvert" to "|",
+    "\\lVert" to "\\Vert",
+    "\\rVert" to "\\Vert",
+)
+
+// JLaTeXMath 不支持 \tag / \tag* / \notag / \nonumber（方程编号宏）。\tag 一旦出现，
+// TeXFormula 直接抛 ParseException，整条公式渲染失败。这里把 \tag{N} 替换成可见的
+// “\qquad(N)”编号（在式子尾部显示，用于证明里相互引用结论）；\notag/\nonumber 删掉（不显示编号）。
+private val TAG_MACRO = Regex("""\\tag\*?\{([^{}]*)\}""")
+private val NOLINE_MACRO = Regex("""\\notag\b|\\nonumber\b""")
+
+/** 仅作用于公式片段（避免误伤代码块里的文本）。 */
+private fun cleanMath(latex: String): String {
+    var s = latex.replace(TAG_MACRO) { m ->
+        val c = m.groupValues[1]
+        val label = if (c.startsWith("(") && c.endsWith(")")) c else "(" + c + ")"
+        "\\qquad" + label
+    }
+    return s.replace(NOLINE_MACRO, "")
+}
+
 private fun normalizeMath(src: String): String {
+    // 先替换不支持的宏（\lvert 等在 JLaTeXMath 中不存在），再做定界符归一化
+    var s = src
+    for ((from, to) in UNSUPPORTED_LATEX_MACROS) s = s.replace(from, to)
     val blocks = mutableListOf<String>()
-    val kept = src.replace(DISPLAY_MATH) { m ->
-        blocks += m.value
+    val kept = s.replace(DISPLAY_MATH) { m ->
+        blocks += cleanMath(m.value)
         "\u0000B${blocks.size - 1}\u0000"
     }
     val converted = kept.replace(INLINE_DOLLAR) { m ->
-        "\$\$" + m.groupValues[1] + "\$\$"
+        "\$\$" + cleanMath(m.groupValues[1]) + "\$\$"
     }
     if (blocks.isEmpty()) return converted
     return converted.replace(Regex("\u0000B(\\d+)\u0000")) { m -> blocks[m.groupValues[1].toInt()] }
@@ -194,6 +329,87 @@ private fun preRenderLatex(normalized: String, tv: TextView) {
                 .build()
         }
     }
+}
+
+// ---------- 行内公式垂直居中（修复下沉） ----------
+// Markwon 的 JLatexInlineAsyncDrawableSpan 把公式图盒子中心对到**文字基线**上
+// （getSize 报 fm.ascent=-h/2、fm.descent=+h/2，父类 ALIGN_CENTER 再按此画），
+// 而公式（f、下标等）自带下降部 → 可见字形明显低于周围文字。这里在
+// setMarkdown 后把行内 span 换成 CenteredInlineLatexSpan（见
+// io.noties.markwon.ext.latex 包内——上游类是包私有，只能同包继承）：只改
+// getSize 的 metrics 报告，以文字自身视觉中心 ((ascent+descent)/2) 为轴；
+// 父类 ALIGN_CENTER 的 draw 把 drawable 中心放到行中心，行内占优时行中心即
+// 文字中心。颜色传播（draw 里 icon.setForeground(paint.color)）由上游逻辑
+// 继承，暗色模式公式仍跟随文字色。块级公式（独占一行）本来就是行中心对齐，
+// 不动。公式 LRU 缓存与异步渲染基于同一 drawable 实例，不受影响。
+
+private const val INLINE_LATEX_SPAN_CLASS = "io.noties.markwon.ext.latex.JLatexInlineAsyncDrawableSpan"
+
+@Volatile private var centeredLatexTheme: MarkwonTheme? = null
+
+private fun latexSpanTheme(tv: TextView): MarkwonTheme =
+    centeredLatexTheme ?: MarkwonTheme.create(tv.context).also { centeredLatexTheme = it }
+
+/** setMarkdown 之后调用：把行内 LaTeX span 换成基于文字视觉中心对齐的版本，并挂点按查看。 */
+private fun centerInlineLatex(tv: TextView, availableWidth: Int, onTap: (Drawable, Int, Int) -> Unit) {
+    val spanned = tv.text as? Spannable ?: run {
+        Log.d(TAG, "centerInlineLatex: tv.text is not Spannable (${tv.text?.javaClass?.name})")
+        return
+    }
+    val all = spanned.getSpans(0, spanned.length, AsyncDrawableSpan::class.java)
+    var replaced = 0
+    for (span in all) {
+        if (span is CenteredInlineLatexSpan) continue
+        // 只替换行内 span；块级（JLatexAsyncDrawableSpan 本体）保持原样
+        if (span.javaClass.name != INLINE_LATEX_SPAN_CLASS) continue
+        val origin = span as? JLatexAsyncDrawableSpan ?: continue
+        val start = spanned.getSpanStart(span)
+        val end = spanned.getSpanEnd(span)
+        if (start < 0 || end <= start) continue
+        val flags = spanned.getSpanFlags(span)
+        val replacement = CenteredInlineLatexSpan.from(origin, latexSpanTheme(tv), availableWidth)
+        spanned.removeSpan(span)
+        spanned.setSpan(replacement, start, end, flags)
+        attachFormulaTap(spanned, origin, start, end, onTap)
+        replaced++
+    }
+    if (replaced > 0) Log.d(TAG, "centerInlineLatex: replaced=$replaced")
+}
+
+/** 块级公式（JLatexAsyncDrawableSpan 本体）：保持原渲染，仅挂点按查看。 */
+private fun clickableBlockLatex(tv: TextView, onTap: (Drawable, Int, Int) -> Unit) {
+    val spanned = tv.text as? Spannable ?: return
+    for (span in spanned.getSpans(0, spanned.length, JLatexAsyncDrawableSpan::class.java)) {
+        if (span.javaClass.name != "io.noties.markwon.ext.latex.JLatexAsyncDrawableSpan") continue
+        val start = spanned.getSpanStart(span)
+        val end = spanned.getSpanEnd(span)
+        if (start < 0 || end <= start) continue
+        attachFormulaTap(spanned, span, start, end, onTap)
+    }
+}
+
+/** 在公式范围内挂 ClickableSpan（点按 → 全屏查看器）。 */
+private fun attachFormulaTap(
+    spanned: Spannable,
+    origin: JLatexAsyncDrawableSpan,
+    start: Int,
+    end: Int,
+    onTap: (Drawable, Int, Int) -> Unit,
+) {
+    // 直接使用已渲染的 drawable 实例（JLatexMathDrawable 不实现 ConstantState，
+    // 无法复制；查看器里只做只读绘制，共用实例安全）。
+    val result = origin.getDrawable().result ?: return
+    val w = result.bounds.right.coerceAtLeast(1)
+    val h = result.bounds.bottom.coerceAtLeast(1)
+    spanned.setSpan(
+        object : ClickableSpan() {
+            override fun onClick(widget: View) = onTap(result, w, h)
+            override fun updateDrawState(ds: TextPaint) = Unit
+        },
+        start,
+        end,
+        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+    )
 }
 
 // ---------- 表格 span 预播种（消除塌缩帧及其引发的滚动跳变） ----------

@@ -14,7 +14,8 @@ App 只依赖 DSH 的**稳定核心接口**与 [dsh-web-all](#与-dsh-web-all-�
 |---|---|
 | 🔄 **实时流式输出** | WebSocket 多路复用 + 断线重连 + 轮询兜底，seq 水位去重 |
 | ⌨️ **打字机渲染** | 生成中按 45ms 步进显示，滚动回收不重放 |
-| 📐 **LaTeX 公式** | Markwon + JLaTeXMath，行内 `$...$` 与块级 `$$...$$` |
+| 📐 **LaTeX 公式** | Markwon + JLaTeXMath，行内 `$...$` 与块级 `$$...$$`；公式与文字垂直居中、超宽自动等比缩放、点按公式全屏放大查看（可滚动）|
+| 🎨 **代码高亮** | 自实现 Markwon `SyntaxHighlight`：29 种语言规则表、语言感知分词不误色，注释/字符串/数字/字面量/关键词五色着色 + LRU 缓存，零 Prism4j 构建依赖 |
 | 💬 **对话管理** | 工作区分组、新建、切换、**归档**（长按对话）、桌面端删除自动同步 |
 | 🖼 **图片上传** | Photo Picker → base64 → 随消息发送，本端即时可见 |
 | 🧠 **思考与工具折叠** | reasoning / tool call 可折叠展示 |
@@ -50,16 +51,16 @@ cd dsh-mobile
 
 App 的手机通道由 [dsh-web-all](https://github.com/zhu1090093659/dsh-web)（@linxin666）插件提供——它是 DSH 的 Web UI 全家桶聚合插件，本项目依赖其 remote-web-ui 组件的**手机远端通道**。
 
-**0.3.12 起（当前适配版本）**：插件不再提供 0.3.6 的 `/m/api` 手机 BFF，改为 **`/remote` 门控镜像**——配对后 App 的一切请求（RPC 信封不变）都经 `/remote/api/*` 与 `/remote/api/remote.mux` 透传到宿主，两个通道共享同一 RPC 面。**全部功能开箱即用，无需任何插件补丁**：
+**0.3.12 起（当前适配版本 0.3.15）**：插件不再提供 0.3.6 的 `/m/api` 手机 BFF，改为 **`/remote` 门控镜像**——配对后 App 的一切请求（RPC 信封不变）都经 `/remote/api/*` 与 `/remote/api/remote.mux` 透传到宿主，两个通道共享同一 RPC 面。**全部功能开箱即用，无需任何插件补丁**：
 
-| App 功能 | 0.3.12 实现方式 | 需要补丁 |
+| App 功能 | 0.3.15 实现方式 | 需要补丁 |
 | --- | --- | --- |
 | 会话归档（长按 → 归档） | 宿主 RPC `workspace/archiveSession`（回退 dsh-session-archive 插件路由） | ❌ 不需要 |
 | 桌面端归档/删除后手机同步 | dsh-session-archive `inventory` 的 `archivedSessionIds` | ❌ 不需要 |
 
 历史资料（0.3.6 运行时补丁的做法、重打与回滚步骤）见 **[PLUGIN_PATCH.md](./PLUGIN_PATCH.md)**（已标注作废）。
 
-### 通道对照（0.3.12）
+### 通道对照（0.3.15）
 
 | 能力 | 插件通道（`?pair=`，推荐） | 核心通道（`?token=` / cookie） |
 | --- | --- | --- |
@@ -89,7 +90,7 @@ app/src/main/java/com/example/DSH_Mobile/
 ## 📚 更多文档
 
 - [IMPLEMENTATION.md](./IMPLEMENTATION.md) — 已实现的 API 契约（经宿主源码核实）与代码导览
-- [PLUGIN_PATCH.md](./PLUGIN_PATCH.md) — dsh-web-all 插件补丁：改动内容、重打步骤、回滚
+- [PLUGIN_PATCH.md](./PLUGIN_PATCH.md) — dsh-web-all 插件补丁：改动内容、重打步骤、回滚（自 0.3.12 起整体作废）
 - [docs/PLAN.zh.md](./docs/PLAN.zh.md) — 最初的设计方案（历史资料）
 
 ---
@@ -108,7 +109,8 @@ The app talks only to DSH's **stable core API** and the mobile channel of the [d
 
 - 🔄 **Realtime streaming** — WebSocket mux with auto-reconnect, polling fallback, seq-watermark dedupe
 - ⌨️ **Typewriter rendering** — 45 ms stepped reveal; scrolling away never replays it
-- 📐 **LaTeX** — Markwon + JLaTeXMath, inline `$...$` and display `$$...$$`
+- 📐 **LaTeX** — Markwon + JLaTeXMath, inline `$...$` and display `$$...$$`; formulas vertically centered with text, oversized ones auto-scaled to fit, tap any formula for a fullscreen scrollable viewer
+- 🎨 **Code highlighting** — a self-implemented Markwon `SyntaxHighlight` with 29 curated language rule sets: language-aware tokenizer (no misleading colors on unknown tokens), comment/string/number/literal/keyword palette, LRU-cached, zero Prism4j build dependency
 - 💬 **Conversations** — workspace grouping, creation, switching, **archiving** (long-press), sync with desktop deletions
 - 🖼 **Image upload** — Photo Picker → base64 → sent with the prompt, visible locally
 - 🧠 **Reasoning & tool-call folding**
@@ -143,16 +145,16 @@ cd dsh-mobile
 
 The mobile channel is powered by the [dsh-web-all](https://github.com/zhu1090093659/dsh-web) plugin (@linxin666) — an all-in-one DSH Web UI bundle. This project relies on its remote-web-ui component for the **mobile remote channel**.
 
-**Since 0.3.12 (the currently adapted version)** the plugin no longer ships the 0.3.6 `/m/api` mobile BFF; instead it exposes a **gated `/remote` mirror** — after pairing, every app request (same RPC envelope) rides `/remote/api/*` and `/remote/api/remote.mux` into the host, so both channels share one RPC surface. **Everything works out of the box, no plugin patch required**:
+**Since 0.3.12 (the currently adapted version, 0.3.15)** the plugin no longer ships the 0.3.6 `/m/api` mobile BFF; instead it exposes a **gated `/remote` mirror** — after pairing, every app request (same RPC envelope) rides `/remote/api/*` and `/remote/api/remote.mux` into the host, so both channels share one RPC surface. **Everything works out of the box, no plugin patch required**:
 
-| App feature | 0.3.12 implementation | Patch needed |
+| App feature | 0.3.15 implementation | Patch needed |
 | --- | --- | --- |
 | Session archiving (long-press → archive) | host RPC `workspace/archiveSession` (fallback: dsh-session-archive plugin route) | ❌ no |
 | Syncing desktop archives/deletions | dsh-session-archive `inventory` → `archivedSessionIds` | ❌ no |
 
 Historical material (the 0.3.6 runtime patch, re-apply and rollback steps) lives in **[PLUGIN_PATCH.md](./PLUGIN_PATCH.md)** (marked obsolete).
 
-### Channel matrix (0.3.12)
+### Channel matrix (0.3.15)
 
 | Capability | Plugin channel (`?pair=`, recommended) | Core channel (`?token=` / cookie) |
 | --- | --- | --- |
@@ -182,5 +184,5 @@ app/src/main/java/com/example/DSH_Mobile/
 ## 📚 More docs
 
 - [IMPLEMENTATION.md](./IMPLEMENTATION.md) — verified API contracts and code tour
-- [PLUGIN_PATCH.md](./PLUGIN_PATCH.md) — the dsh-web-all plugin patch: what, why, how to re-apply
+- [PLUGIN_PATCH.md](./PLUGIN_PATCH.md) — the dsh-web-all plugin patch: what, why, how to re-apply (obsolete since 0.3.12)
 - [docs/PLAN.zh.md](./docs/PLAN.zh.md) — original design document (historical)

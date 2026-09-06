@@ -15,8 +15,8 @@ android {
         applicationId = "com.example.DSH_Mobile"
         minSdk = 30
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.2-tables"
+        versionCode = 5
+        versionName = "1.0.3-remote312"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

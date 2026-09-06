@@ -20,6 +20,9 @@ build/
 # kotlin session caches
 .kotlin/
 
+# scratch/debug leftovers, never publish
+undefined/
+
 # local artifacts that must never be published
 *.apk
 *.jks

@@ -11,7 +11,8 @@
 | 网络 | OkHttp（HTTP RPC + WebSocket mux）；kotlinx.serialization JSON（JsonObject 防御式解析） |
 | 实时 | WebSocket `/api/remote.mux` 逻辑流 `session/follow`；失败自动重连，2 次后退化为 `session/page` 拉日志尾部（0.3.12 起 `session/inspect` 已被宿主移除；seq 水位去重） |
 | Markdown | Markwon core + ext-latex（JLaTeXMath Android 版） |
-| LaTeX | `$...$` / `$$...$$` 由 Markwon LatexPlugin 在 TextView 内渲染（F7） |
+| LaTeX | `$...$` / `$$...$$` 由 Markwon LatexPlugin 在 TextView 内渲染（F7）；行内公式居中与超宽缩放见 CenteredInlineLatexSpan，点按全屏查看 |
+| 代码高亮 | `ui/CodeHighlight.kt`：自实现 Markwon `SyntaxHighlight` 接口（29 种语言规则表 + generic 回退，`none` 不着色），语言感知正则分词 + LRU(256) 缓存；**不引入 prism4j/prism4j-bundler**（理由见 §7.3） |
 | 存储 | DataStore + AndroidKeyStore AES-256/GCM 加密配对 cookie |
 | 图片 | Photo Picker（PickMultipleVisualMedia）→ 校验 mediaType/大小 → base64（无前缀）→ session/prompt content |
 | 架构 | ViewModel + StateFlow + Coroutines；MessageStore 折叠事件流 |
@@ -99,7 +100,11 @@ app/src/main/java/com/example/DSH_Mobile/
 └── ui/
     ├── Theme.kt / DshApp.kt / ConnectScreen.kt / SessionListScreen.kt
     ├── ChatScreen.kt          # 消息列表 + 滚动策略(F13) + 长消息折叠(F14) + 输入栏 + 模型弹窗
-    └── MarkdownText.kt        # Markwon+LaTeX(F7) + 打字机(F5: 45ms, step=max(1,min(9,ceil(remain/12))))
+    ├── MarkdownText.kt        # Markwon+LaTeX(F7) + 打字机(F5: 45ms, step=max(1,min(9,ceil(remain/12))))
+    │                          #   + 行内公式居中/超宽缩放 + 点按公式全屏查看器 + normalizeMath 宏清洗
+    └── CodeHighlight.kt       # 代码块语法高亮：SimpleSyntaxHighlight + CodeHighlightPlugin（见 §7.3）
+app/src/main/java/io/noties/markwon/ext/latex/CenteredInlineLatexSpan.kt
+                               # 同包继承包私有上游类：行内公式视觉中心对齐 + 按可用宽等比缩小
 app/src/test/java/com/example/DSH_Mobile/MessageStoreTest.kt  # fold 逻辑单元测试
 ```
 
@@ -135,6 +140,7 @@ JDK 17 + Android SDK（local.properties 指向）。输出：`app/build/outputs/
 - ✅ F13 滚动策略（首进到底；nearBottom < 80px 才跟随）
 - ✅ F14 长消息折叠（截断正文，按钮在正文之外）
 - ✅ F15 智能体预设切换（插话模式旁新增预设按钮，点击展开圆形矩阵弹层；模型/工作区菜单改圆角矩形。名单走核心 `agentPresets/list`；0.3.12 起两通道等价，已有会话经 `agentPresets/select` 切换（会话开始后宿主拒绝：agent-preset-locked）。草稿态记住选择、首发消息随 `session/create` 的 `agentPreset` 下发）
+- ✅ 代码块语法高亮（`ui/CodeHighlight.kt`：`SimpleSyntaxHighlight` 实现 Markwon `SyntaxHighlight` 接口，29 种语言规则表（kotlin/java/python/js/ts/c/cpp/csharp/go/rust/sql/bash/yaml/toml/json/properties/ini/makefile/dockerfile/perl/ruby/swift/dart/php/powershell/r/css/html/xml）+ generic 回退；`CodeHighlightPlugin` 注册进 `buildMarkwon`；配色针对浅色聊天面调校）
 - ⏳ 待办：历史分页加载更早消息（session/page）、workspace/follow 工作区分组、附件取回（session/attachment 渲染历史图片）、$events 流驱动会话列表实时刷新、消息重发/编辑队列（updateQueue）、深链/快捷入口。
 
 ## 6. 已知风险
@@ -207,6 +213,11 @@ adb shell input keyevent KEYCODE_WAKEUP # 熄屏时先唤醒（授权弹窗掉�
   修法：`LaunchedEffect(pending, resetKey)` 让效果随状态一起重启（`TypewriterMarkdown`）。
   凡是 effect 闭包要写、UI 又要读的状态，effect 的 key 必须覆盖该状态的 remember key。
 - **"unexpected scheme: wss"（OkHttp 坑，1.0.3 修复）**：OkHttp 4 的 `HttpUrl.Builder.scheme()` 只接受 http/https，`scheme("wss")` 直接抛 `IllegalArgumentException`——WS 从未真正发出过（实时流一直在靠轮询兜底）。OkHttp 的正确用法是给 `newWebSocket` 传 **http/https URL**（https 连接自动按 wss 升级握手），不要手改 scheme。
+- **行内公式"下沉"（1.0.3 修复）**：Markwon 的行内 LaTeX span（JLatexInlineAsyncDrawableSpan）把公式盒子中心对到**文字基线**，且父链 ALIGN_CENTER 的 draw 以「行盒中心」为轴——行距倍率（setLineSpacing mult）会把行盒底部拉长，行中心下坠，公式跟着沉。修法：`app/src/main/java/io/noties/markwon/ext/latex/CenteredInlineLatexSpan.kt`（internal，同包继承包私有的上游类），getSize 以文字视觉中心 ((ascent+descent)/2) 为轴报告 metrics，draw 显式平移把盒子中心钉在文字视觉中心（不受行距影响）；颜色传播（icon.setForeground(paint.color)，暗色模式）复制保留。`centerInlineLatex`（MarkdownText）在 stabilizeLatex 之后把行内 span 替换为该类（按类名识别：`io.noties.markwon.ext.latex.JLatexInlineAsyncDrawableSpan`），块级公式不动，公式 LRU 缓存与异步渲染基于同一 drawable 实例不受影响。
+- **超宽公式"裁切"（1.0.3 修复）**：AI 常用**行内** `$...$` 写很长的公式，行内 span 没有块级那条缩放到画布宽的逻辑，比屏宽宽就 TextView 直接裁切。修法：CenteredInlineLatexSpan 按可用宽度（targetWidthPx）等比缩小（getSize 报缩小后的尺寸、draw 里 canvas.scale 配合 JLatexMathDrawable 自身的缩放逻辑）。配合**点按公式 → 全屏查看器**（MarkdownText 内 `LatexViewerPayload` + Dialog：1.6 倍放大（`VIEWER_SCALE` 可调）、横向/纵向可滚动、弹出带 200ms 淡入+上浮缩放动画（Animatable 0→1，transformOrigin 顶部中心）），细节可读。块级公式挂点按走 `clickableBlockLatex`。注意：JLatexMathDrawable **不实现 ConstantState**，查看器直接共用已渲染的 drawable 实例（只读绘制安全）；LinkMovementMethod 已在 TextView 上，ClickableSpan 点按天然可用（公式区域的拖动会被消费，列表滚动需从公式外起始）。
+- **`\lvert` 公式渲染失败（1.0.3 修复）**：JLaTeXMath 不支持 AMS 定界宏 `\lvert`/`\rvert`（以及 `\lVert`/`\rVert`），含这些宏的整条公式解析失败无法渲染。修法：`normalizeMath` 开头先做宏清洗（`UNSUPPORTED_LATEX_MACROS` 表：`\lvert`/`\rvert` → `|`，`\lVert`/`\rVert` → `\Vert`），再做定界符归一化。后续遇到其他渲染失败的宏（如 `\middle`）按同表扩展。
+- **代码高亮为什么不用 Prism4j（1.0.3 决策）**：Markwon 官方 syntax 扩展硬绑 prism4j，其语法文件需要 prism4j-bundler 注解处理器代码生成（给构建链加一层）；且通用规则集存在"首字母大写猜类型"式的臆测着色，在注释/字符串里也会上色，产生误导。改为自实现 `SyntaxHighlight` 接口：每种语言自带关键词表/注释定界/字面量表，**只给确定属于该语言的 token 上色**，未知语言退到保守最小集（if/else/for/while/return/function/class/import/new + 字符串/数字/`//`/`/* */`），`none` 完全不着色。分词是单条合并正则（注释|字符串|数字|字面量|关键词，交替顺序即优先级，字符串/注释内的关键词天然被整段吞掉）。高亮结果按 `lang+code` 走 LRU(256) 缓存，滚动回收重建不重复分词；每语言的 master 正则另有编译缓存。
+- **调试技巧（MuMu 模拟器）**：多设备时 adb 命令必须 `-s 127.0.0.1:16384`（MuMu 12；7555/5555 同实例别名）；MIUI 真机的 ADB 安装会被「USB 安装提示」弹窗限制（10s 自动拒绝，勾选过"不再提示"则静默失败 `INSTALL_FAILED_USER_RESTRICTED`），绕过方式 = 推 APK 到 `/sdcard/Download` 手动安装；`input text` 的空格用 `%s`、`$` 用 `\$`、反斜杠经两层 shell 要写四条；PowerShell 的 `>` 重定向会损坏二进制截图，必须 screencap+pull。
 - **自动跟随**：`nearBottom` 必须算"视口末端到列表末端剩余距离"（`last.offset+last.size-viewEnd`）。
   老写法 `viewportEnd-last.size` 在长消息内部滚动时为负值被误判为贴底，导致每个 chunk 把视图拽到最底部。
   跟随滚动用大偏移 `scrollToItem(lastIndex, 1_000_000)` 钉底——offset=0 会把长消息**顶部**弹进视口。
