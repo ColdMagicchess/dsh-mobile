@@ -273,7 +273,9 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
         while (u < 1f && settleActive) {
             u = (withFrameMillis { it } - start) / 300f
             fx.settleP = u.coerceIn(0f, 1f)
-            animT = fx.tConverge   // 保持 Canvas 每帧重绘
+            // 必须携带变化写 animT：写同值不触发 Canvas 重绘，
+            // 落位淡出就整段没播（位图原地停留后瞬间消失=卡顿真因）
+            animT = fx.tConverge + u
         }
         settleActive = false
         fx.settleP = 0f
