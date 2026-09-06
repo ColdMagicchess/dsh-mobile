@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>粒子玻璃窗 · 鸿蒙 7 消散 / 汇聚效果</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #05070f;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #scene { position: fixed; inset: 0; display: block; }
+  #brand {
+    position: fixed; top: 18px; left: 22px; z-index: 2;
+    font: 600 12px/1.6 "HarmonyOS Sans SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+    letter-spacing: .18em; color: rgba(255,255,255,.30); pointer-events: none;
+  }
+  #brand b { color: rgba(255,255,255,.55); font-weight: 700; }
+  #hint {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    padding: 9px 18px; border-radius: 999px; z-index: 2;
+    background: rgba(255,255,255,.055);
+    border: 1px solid rgba(255,255,255,.12);
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    color: rgba(255,255,255,.68); font-size: 12.5px; letter-spacing: .06em;
+    font-family: "HarmonyOS Sans SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+    white-space: nowrap; transition: opacity .5s ease; pointer-events: none;
+  }
+  #hint:empty { opacity: 0; }
+  #hint .n { color: #8ea6ff; font-weight: 600; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="brand"><b>PARTICLE</b> · GLASS — 参考鸿蒙 7 粒子消散</div>
+<div id="hint">轻点窗口 · 化作万千粒子</div>
+
+<script>
+"use strict";
+/* ============================================================
+   粒子玻璃窗 —— 参考 HarmonyOS 7 的粒子消散 / 汇聚动效
+   全流程 Canvas 2D：
+   1. 低分辨率渐变光斑背景（放大采样天然柔化）
+   2. 玻璃卡片层：离屏合成 = 模糊取景(backdrop-blur) + 白色蒙层
+      + 渐变描边高光 + 内容(图标/波形/进度/控件) + 周期扫光
+   3. 消散：以触点为圆心做 destination-out「碎裂波」擦除，
+      同时像素被烘焙为粒子：径向延迟飞出 + 湍流风场 + 上浮 + 闪烁
+   4. 汇聚：粒子沿螺旋轨道收束回像素原位，落位焊花微闪后熄灭，
+      卡片层以 blur->0 + alpha 0->1 的「重铸」方式浮现
+   ============================================================ */
+
+const TAU = Math.PI * 2;
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+const hintEl = document.getElementById('hint');
+
+let DPR = Math.min(2, window.devicePixelRatio || 1);
+let W = 0, H = 0;
+let nowT = 0;                    // 全局时间（秒）
+
+/* ---------------- 背景（光斑壁纸） ---------------- */
+const BG_SCALE = 5;              // 背景以 1/5 分辨率绘制，放大后天然模糊
+let bgCanvas = document.createElement('canvas');
+let bgCtx = bgCanvas.getContext('2d');
+let blobs = [];
+const BLOB_COLORS = [
+  '#4f46e5', '#7c3aed', '#0ea5e9', '#a855f7',
+  '#22d3ee', '#6366f1', '#f472b6', '#2563eb',
+];
+function initBlobs() {
+  blobs = [];
+  for (let i = 0; i < 9; i++) {
+    blobs.push({
+      x: Math.random(), y: Math.random(),
+      r: 0.16 + Math.random() * 0.30,
+      a: 0.13 + Math.random() * 0.16,
+      c: BLOB_COLORS[i % BLOB_COLORS.length],
+      vx: (Math.random() - 0.5) * 0.022,
+      vy: (Math.random() - 0.5) * 0.015,
+    });
+  }
+}
+function drawBackground(dt) {
+  const bw = bgCanvas.width, bh = bgCanvas.height;
+  bgCtx.globalCompositeOperation = 'source-over';
+  const g = bgCtx.createLinearGradient(0, 0, bw, bh);
+  g.addColorStop(0, '#080b1e'); g.addColorStop(0.55, '#0a0a1e'); g.addColorStop(1, '#140a26');
+  bgCtx.fillStyle = g; bgCtx.fillRect(0, 0, bw, bh);
+  bgCtx.globalCompositeOperation = 'lighter';
+  for (const b of blobs) {
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    if (b.x < -0.25) b.x = 1.25; if (b.x > 1.25) b.x = -0.25;
+    if (b.y < -0.25) b.y = 1.25; if (b.y > 1.25) b.y = -0.25;
+    const cx = b.x * bw, cy = b.y * bh, r = b.r * Math.max(bw, bh);
+    const rg = bgCtx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    rg.addColorStop(0, hexA(b.c, b.a));
+    rg.addColorStop(1, hexA(b.c, 0));
+    bgCtx.fillStyle = rg;
+    bgCtx.fillRect(cx - r, cy - r, r * 2, r * 2);
+  }
+}
+function hexA(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+}
+
+/* ---------------- 卡片几何 & 离屏画布 ---------------- */
+let CW = 430, CH = 306, CR = 26;          // 卡片宽 / 高 / 圆角（CSS px）
+let cardX = 0, cardY = 0;                  // 卡片屏幕位置
+let layerCv, layerCtx;                     // 整卡合成层（玻璃+内容+特效）
+let contentCv;                             // 内容预渲染层
+let bobY = 0;                              // 呼吸浮动偏移
+
+function makeCanvas(wCss, hCss) {
+  const c = document.createElement('canvas');
+  c.width = Math.ceil(wCss * DPR); c.height = Math.ceil(hCss * DPR);
+  const x = c.getContext('2d');
+  x.setTransform(DPR, 0, 0, DPR, 0, 0);
+  return { c, x };
+}
+
+function roundRect(g, x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
+
+/* ---------------- 卡片内容（预渲染一次） ---------------- */
+const FONT = '"HarmonyOS Sans SC","Microsoft YaHei UI","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",sans-serif';
+function drawContent() {
+  const t = makeCanvas(CW, CH); contentCv = t.c;
+  const g = t.x;
+  g.textBaseline = 'alphabetic';
+
+  /* 应用图标：圆角渐变方块 + 八角星芒 */
+  const ig = g.createLinearGradient(22, 20, 66, 64);
+  ig.addColorStop(0, '#5b8cff'); ig.addColorStop(1, '#a55cff');
+  g.save();
+  g.shadowColor = 'rgba(120,100,255,.55)'; g.shadowBlur = 18;
+  g.fillStyle = ig; roundRect(g, 22, 20, 44, 44, 13); g.fill();
+  g.restore();
+  g.strokeStyle = 'rgba(255,255,255,.95)'; g.lineWidth = 1.8; g.lineCap = 'round';
+  g.beginPath();
+  g.moveTo(44, 31); g.lineTo(44, 53);
+  g.moveTo(33, 42); g.lineTo(55, 42);
+  g.moveTo(36.2, 34.2); g.lineTo(51.8, 49.8);
+  g.moveTo(51.8, 34.2); g.lineTo(36.2, 49.8);
+  g.stroke();
+
+  /* 标题 & 副标题 */
+  g.fillStyle = '#fff'; g.font = '600 17px ' + FONT;
+  g.fillText('粒子玻璃窗', 78, 40);
+  g.fillStyle = 'rgba(255,255,255,.58)'; g.font = '400 11.5px ' + FONT;
+  g.fillText('HARMONYOS 7 · PARTICLE DISPERSE & REASSEMBLE', 78, 58);
+
+  /* 右上三点窗控 */
+  for (let i = 0; i < 3; i++) {
+    g.beginPath(); g.arc(CW - 60 + i * 15, 36, 3.4, 0, TAU);
+    g.fillStyle = 'rgba(255,255,255,' + (i === 2 ? 0.75 : 0.38) + ')'; g.fill();
+  }
+
+  /* 波形频谱（伪随机包络，静态烘焙进粒子） */
+  const wx = 24, ww = CW - 48, n = 44, bwid = 4, gap = (ww - n * bwid) / (n - 1);
+  const wcy = 118, wmax = 34;
+  const wg = g.createLinearGradient(0, wcy - wmax, 0, wcy + wmax);
+  wg.addColorStop(0, 'rgba(126,140,255,.98)'); wg.addColorStop(1, 'rgba(64,224,255,.98)');
+  g.fillStyle = wg;
+  let s = 7;
+  const pr = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
+  for (let i = 0; i < n; i++) {
+    const env = Math.sin((i / n) * Math.PI);
+    const h = (0.24 + 0.76 * pr()) * (0.42 + 0.58 * env) * wmax;
+    g.fillRect(wx + i * (bwid + gap), wcy - h, bwid, h * 2);
+  }
+
+  /* 进度条 */
+  const py = 168, p0 = 24, p1 = CW - 24, fill = 0.42;
+  g.lineCap = 'round'; g.lineWidth = 4; g.strokeStyle = 'rgba(255,255,255,.16)';
+  g.beginPath(); g.moveTo(p0, py); g.lineTo(p1, py); g.stroke();
+  const pg = g.createLinearGradient(p0, 0, p1, 0);
+  pg.addColorStop(0, '#5b8cff'); pg.addColorStop(1, '#b56bff');
+  g.strokeStyle = pg; g.beginPath(); g.moveTo(p0, py); g.lineTo(p0 + (p1 - p0) * fill, py); g.stroke();
+  g.beginPath(); g.arc(p0 + (p1 - p0) * fill, py, 6, 0, TAU);
+  g.fillStyle = 'rgba(255,255,255,.28)'; g.fill();
+  g.beginPath(); g.arc(p0 + (p1 - p0) * fill, py, 4, 0, TAU);
+  g.fillStyle = '#fff'; g.fill();
+  g.font = '10.5px ' + FONT; g.fillStyle = 'rgba(255,255,255,.5)';
+  g.fillText('1:38', p0, py + 18);
+  g.textAlign = 'right'; g.fillText('3:52', p1, py + 18); g.textAlign = 'left';
+
+  /* 播放控件 */
+  const mcy = 224;
+  g.fillStyle = 'rgba(255,255,255,.82)';
+  tri(g, CW / 2 - 78, mcy, -1); tri(g, CW / 2 + 78, mcy, 1);
+  const bg2 = g.createLinearGradient(CW / 2 - 21, mcy - 21, CW / 2 + 21, mcy + 21);
+  bg2.addColorStop(0, '#6f7dff'); bg2.addColorStop(1, '#c05cff');
+  g.save(); g.shadowColor = 'rgba(140,100,255,.6)'; g.shadowBlur = 16;
+  g.beginPath(); g.arc(CW / 2, mcy, 21, 0, TAU); g.fillStyle = bg2; g.fill();
+  g.restore();
+  g.beginPath(); g.moveTo(CW / 2 - 5, mcy - 8); g.lineTo(CW / 2 - 5, mcy + 8); g.lineTo(CW / 2 + 9, mcy); g.closePath();
+  g.fillStyle = '#fff'; g.fill();
+
+  /* 底部提示 */
+  g.textAlign = 'center';
+  g.font = '400 11.5px ' + FONT; g.fillStyle = 'rgba(255,255,255,.52)';
+  g.fillText('轻点窗口 · 化为粒子', CW / 2, CH - 14);
+  g.strokeStyle = 'rgba(255,255,255,.32)'; g.lineWidth = 1.6; g.lineCap = 'round';
+  g.beginPath(); g.arc(CW / 2, CH - 34, 8.5, Math.PI * 0.15, Math.PI * 0.85); g.stroke();
+  g.fillStyle = 'rgba(255,255,255,.32)';
+  g.beginPath(); g.arc(CW / 2, CH - 25.6, 1.8, 0, TAU); g.fill();
+  g.textAlign = 'left';
+}
+function tri(g, cx, cy, dir) {   // 上一曲 / 下一曲（双三角 + 竖线）
+  g.beginPath();
+  g.moveTo(cx, cy); g.lineTo(cx - 9 * dir, cy - 7); g.lineTo(cx - 9 * dir, cy + 7); g.closePath();
+  g.moveTo(cx - 10 * dir, cy); g.lineTo(cx - 19 * dir, cy - 7); g.lineTo(cx - 19 * dir, cy + 7); g.closePath();
+  g.fill();
+  g.fillRect(cx + 11 * dir - (dir > 0 ? 0 : 2), cy - 7, 2, 14);
+}
+
+/* ---------------- 整卡合成层（每帧渲染） ---------------- */
+let mouseX = 0, mouseY = 0;
+function renderLayer(eraseR, blurPx) {
+  const g = layerCtx;
+  g.clearRect(0, 0, CW, CH);
+
+  /* 玻璃取景：卡片区域的背景 + 视差偏移 + 模糊，模拟 backdrop-filter */
+  g.save();
+  roundRect(g, 0, 0, CW, CH, CR); g.clip();
+  if (supportsFilter) g.filter = 'blur(' + (10 + blurPx) + 'px)';
+  const par = 0.012;
+  const ox = (mouseX - (cardX + CW / 2)) * par, oy = (mouseY - (cardY + CH / 2)) * par;
+  const m = 60;                                  // 边缘余量，避免模糊露边
+  g.drawImage(bgCanvas,
+    (cardX - m - ox) * bgCanvas.width / W, (cardY - m - oy) * bgCanvas.height / H,
+    (CW + m * 2) * bgCanvas.width / W, (CH + m * 2) * bgCanvas.height / H,
+    -m - ox, -m - oy, CW + m * 2, CH + m * 2);
+  g.filter = 'none';
+  let sg = g.createLinearGradient(0, 0, 0, CH);      // 白色蒙层：上亮下暗
+  sg.addColorStop(0, 'rgba(255,255,255,.14)');
+  sg.addColorStop(.55, 'rgba(255,255,255,.08)');
+  sg.addColorStop(1, 'rgba(255,255,255,.13)');
+  g.fillStyle = sg; g.fillRect(0, 0, CW, CH);
+  let tg = g.createRadialGradient(CW * .28, -30, 0, CW * .28, -30, CW * .9); // 顶部环境高光
+  tg.addColorStop(0, 'rgba(255,255,255,.16)'); tg.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = tg; g.fillRect(0, 0, CW, CH);
+  g.drawImage(contentCv, 0, 0, CW, CH);
+  drawSweep(g);
+  g.restore();
+
+  /* 描边：左上亮 → 右下暗，再叠一层内描边 */
+  const lg = g.createLinearGradient(0, 0, CW, CH);
+  lg.addColorStop(0, 'rgba(255,255,255,.55)');
+  lg.addColorStop(.3, 'rgba(255,255,255,.16)');
+  lg.addColorStop(1, 'rgba(255,255,255,.06)');
+  roundRect(g, .5, .5, CW - 1, CH - 1, CR); g.strokeStyle = lg; g.lineWidth = 1; g.stroke();
+  roundRect(g, 1.5, 1.5, CW - 3, CH - 3, CR - 1); g.strokeStyle = 'rgba(255,255,255,.07)'; g.lineWidth = 1; g.stroke();
+
+  /* 碎裂波擦除（消散时以触点为圆心挖洞） */
+  if (eraseR > 0) {
+    g.globalCompositeOperation = 'destination-out';
+    const inner = Math.max(0, eraseR - 46);
+    const rg = g.createRadialGradient(lastClickLx, lastClickLy, inner, lastClickLx, lastClickLy, eraseR);
+    rg.addColorStop(0, 'rgba(0,0,0,1)'); rg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = rg; g.fillRect(0, 0, CW, CH);
+    g.globalCompositeOperation = 'source-over';
+  }
+}
+/* 周期性扫光，让玻璃「活着」 */
+function drawSweep(g) {
+  if (mode !== 'solid') return;
+  const ph = (nowT * 0.11) % 1;
+  if (ph > 0.42) return;                          // 只在周期前段出现
+  const q = ph / 0.42;
+  const x = -0.35 * CW + q * 1.7 * CW;
+  g.save();
+  g.translate(CW / 2, CH / 2); g.rotate(-0.32); g.translate(-CW / 2, -CH / 2);
+  const lg = g.createLinearGradient(x - 70, 0, x + 70, 0);
+  const a = Math.sin(q * Math.PI) * 0.11;
+  lg.addColorStop(0, 'rgba(255,255,255,0)');
+  lg.addColorStop(.5, 'rgba(255,255,255,' + a + ')');
+  lg.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = lg; g.fillRect(-CW, -CH, CW * 3, CH * 3);
+  g.restore();
+}
+
+/* ---------------- 粒子系统 ---------------- */
+const CAP = 26000;
+let N = 0;
+const hx = new Float32Array(CAP), hy = new Float32Array(CAP);   // 原位（世界坐标）
+const ox = new Float32Array(CAP), oy = new Float32Array(CAP);   // 消散位移
+const vx = new Float32Array(CAP), vy = new Float32Array(CAP);
+const dl = new Float32Array(CAP);                                // 延迟
+const rn = new Float32Array(CAP);                                // 随机数 0~1
+const sd = new Float32Array(CAP);                                // 种子
+const sz = new Float32Array(CAP), ba = new Float32Array(CAP);    // 尺寸 / 基础透明度
+const rel = new Uint8Array(CAP);                                 // 已释放
+const alive = new Uint8Array(CAP);
+const cols = new Array(CAP);                                     // 'rgb(...)' 缓存
+/* 汇聚参数 */
+const sxa = new Float32Array(CAP), sya = new Float32Array(CAP);
+const sr = new Float32Array(CAP), sa = new Float32Array(CAP);
+const sw = new Float32Array(CAP), dur = new Float32Array(CAP);
+const ln = new Uint8Array(CAP);                                  // 已落位
+const landT = new Float32Array(CAP);                             // 落位时刻
+
+let lastClickLx = 0, lastClickLy = 0;                            // 触点（卡片局部坐标）
+let sampleCount = 0;
+
+/* 从合成层烘焙粒子：按网格采样像素颜色 */
+function buildParticles() {
+  const sw2 = layerCv.width, sh2 = layerCv.height;
+  let stepD = Math.max(2, Math.round(3 * DPR));
+  for (;;) {
+    const est = Math.ceil(sw2 / stepD) * Math.ceil(sh2 / stepD);
+    if (est <= 15000 || stepD >= 8) break;
+    stepD += 1;
+  }
+  const data = layerCtx.getImageData(0, 0, sw2, sh2).data;
+  N = 0;
+  for (let py = 0; py < sh2; py += stepD) {
+    for (let px = 0; px < sw2; px += stepD) {
+      const idx = (py * sw2 + px) * 4;
+      const a = data[idx + 3];
+      if (a < 26 || N >= CAP) continue;
+      const i = N++;
+      hx[i] = cardX + px / DPR; hy[i] = cardY + (py / DPR + bobY);  // 世界坐标（烘焙当前 bob）
+      ox[i] = oy[i] = 0; vx[i] = vy[i] = 0; rel[i] = 0; alive[i] = 1; ln[i] = 0;
+      rn[i] = Math.random(); sd[i] = Math.random() * 100;
+      sz[i] = (stepD / DPR) * (0.85 + rn[i] * 0.65);
+      ba[i] = (a / 255) * (0.9 + 0.1 * rn[i]);
+      /* 提亮：让暗部像素也能在 lighter 混合下发光 */
+      const boost = 26;
+      cols[i] = 'rgb(' + Math.min(255, data[idx] + boost) + ',' +
+                         Math.min(255, data[idx + 1] + boost) + ',' +
+                         Math.min(255, data[idx + 2] + boost) + ')';
+    }
+  }
+  sampleCount = N;
+}
+
+function easeOutQuad(t) { return 1 - (1 - t) * (1 - t); }
+function easeInOutCubic(t) { return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+const clamp01 = t => t < 0 ? 0 : t > 1 ? 1 : t;
+
+/* ---- 消散：以触点为圆心，径向波延迟 + 湍流 + 上浮 + 闪烁 ---- */
+const DISP_DUR = 1.8;
+function startDisperse(cx, cy, fromCurrent) {
+  renderLayer(0, 0);
+  buildParticles();
+  lastClickLx = cx - cardX; lastClickLy = cy - cardY;
+  const maxD = Math.hypot(CW, CH);
+  for (let i = 0; i < N; i++) {
+    const px = fromCurrent ? hx[i] + ox[i] : hx[i];
+    const py = fromCurrent ? hy[i] + oy[i] : hy[i];
+    const dx = px - cx, dy = py - cy, d = Math.hypot(dx, dy) || 1;
+    dl[i] = (d / maxD) * 0.38 + rn[i] * 0.09;
+    const ang = Math.atan2(dy, dx) + (rn[i] - .5) * 1.35;
+    const sp = 120 + rn[i] * 285 + d * 0.45;
+    vx[i] = Math.cos(ang) * sp + (fromCurrent ? (Math.random() - .5) * 40 : 0);
+    vy[i] = Math.sin(ang) * sp * 0.8 - 18 - rn[i] * 46 + (fromCurrent ? (Math.random() - .5) * 40 : 0);
+    if (fromCurrent) { ox[i] = px - hx[i]; oy[i] = py - hy[i]; }
+    rel[i] = 0; alive[i] = 1; ln[i] = 0;
+  }
+  mode = 'dispersing'; animT0 = nowT;
+  ripples.push({ x: cx, y: cy, t0: nowT });
+  setHint();
+}
+function updateDisperse(dt) {
+  const T = nowT - animT0;
+  for (let i = 0; i < N; i++) {
+    if (!alive[i]) continue;
+    const age = T - dl[i];
+    if (age < 0) continue;
+    rel[i] = 1;
+    /* 湍流风场：双频正弦 + 高度剪切，模拟「风中沙尘」 */
+    const f1 = Math.sin(T * 2.1 + sd[i] * 7.3), f2 = Math.cos(T * 1.6 + sd[i] * 13.7);
+    const wind = 34 * Math.sin(T * 0.9 + oy[i] * 0.011 + sd[i]);
+    vx[i] += (f1 * 62 + wind * 0.8) * dt;
+    vy[i] += (f2 * 44 - 30) * dt;                                 // 净上浮
+    const drag = Math.exp(-1.05 * dt);
+    vx[i] *= drag; vy[i] *= drag;
+    ox[i] += vx[i] * dt; oy[i] += vy[i] * dt;
+    if (age > 1.42) alive[i] = 0;
+  }
+  if (T > DISP_DUR) { mode = 'dispersed'; setHint(); }
+}
+function drawDisperseParticles() {
+  const T = nowT - animT0;
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < N; i++) {
+    if (!alive[i] || !rel[i]) continue;
+    const age = T - dl[i];
+    if (age < 0) continue;
+    let a = ba[i] * clamp01(1 - age / 1.15);
+    if (a <= 0.02) continue;
+    a *= 0.72 + 0.28 * Math.sin(T * (5 + rn[i] * 9) + sd[i] * 31);  // 闪烁
+    const s = sz[i] * (0.45 + 0.55 * clamp01(1 - age / 1.1));
+    ctx.fillStyle = cols[i]; ctx.globalAlpha = Math.min(1, a);
+    ctx.fillRect(hx[i] + ox[i], hy[i] + oy[i], s, s);
+    if (rn[i] > 0.965) {                                           // 高亮「主粒子」带光晕
+      ctx.globalAlpha = Math.min(1, a * 0.28);
+      ctx.fillRect(hx[i] + ox[i] - s, hy[i] + oy[i] - s, s * 3, s * 3);
+    }
+  }
+  ctx.restore(); ctx.globalAlpha = 1;
+}
+
+/* ---- 汇聚：螺旋收束 + 落位焊花 + 卡片 blur-in 重铸 ---- */
+const REF_DUR = 1.18, REF_EXTRA = 0.42;
+function startReform(fromCurrent) {
+  const ccx = cardX + CW / 2, ccy = cardY + bobY + CH / 2;
+  const maxD = Math.hypot(CW, CH) / 2;
+  for (let i = 0; i < N; i++) {
+    let px, py;
+    if (fromCurrent) { px = hx[i] + ox[i]; py = hy[i] + oy[i]; }
+    else {
+      const a0 = Math.atan2(hy[i] - ccy, hx[i] - ccx) + (rn[i] - .5) * 1.6;
+      const spawnR = (0.95 + rn[i] * 1.25) * Math.max(CW, CH) * 1.15;
+      px = ccx + Math.cos(a0) * spawnR; py = ccy + Math.sin(a0) * spawnR * 0.78;
+    }
+    sxa[i] = px; sya[i] = py;
+    const dx = px - hx[i], dy = py - hy[i];
+    sr[i] = Math.hypot(dx, dy);
+    sa[i] = Math.atan2(dy, dx);
+    sw[i] = (Math.random() < .5 ? -1 : 1) * (0.9 + Math.random() * 2.1);     // 螺旋量
+    dur[i] = 0.7 + Math.random() * 0.42;
+    const dn = clamp01(Math.hypot(hx[i] - ccx, hy[i] - ccy) / maxD);
+    dl[i] = fromCurrent ? Math.random() * 0.2
+                        : dn * 0.25 + Math.random() * 0.19;                   // 边缘先动、中心后动
+    ln[i] = 0; alive[i] = 1; ox[i] = oy[i] = 0;
+  }
+  mode = 'reforming'; animT0 = nowT;
+  setHint();
+}
+function updateReform() {
+  const T = nowT - animT0;
+  let allLanded = true;
+  for (let i = 0; i < N; i++) {
+    const p = clamp01((T - dl[i]) / dur[i]);
+    if (p < 1) allLanded = false;
+    if (p >= 1 && !ln[i]) { ln[i] = 1; landT[i] = nowT; }
+  }
+  if (T > REF_DUR + REF_EXTRA && allLanded) {
+    mode = 'solid';
+    flashes.push({ x: cardX + CW / 2, y: cardY + bobY + CH / 2, t0: nowT, r: Math.max(CW, CH) * 0.62 });
+    setHint();
+  }
+}
+function drawReformParticles() {
+  const T = nowT - animT0;
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < N; i++) {
+    const p = clamp01((T - dl[i]) / dur[i]);
+    if (p <= 0) continue;
+    let x, y, a, s = sz[i];
+    if (p < 1) {
+      const e = easeInOutCubic(p);
+      const r = sr[i] * (1 - e);
+      const ang = sa[i] + sw[i] * (1 - e);
+      x = hx[i] + Math.cos(ang) * r;
+      y = hy[i] + Math.sin(ang) * r;
+      a = ba[i] * (0.25 + 0.75 * e);
+      if (p > 0.78) { const k = (p - 0.78) / 0.22; a = ba[i] * (1 + 0.85 * k); s *= 1 + 0.7 * k; }   // 焊花
+    } else {
+      const la = nowT - landT[i];
+      if (la > 0.2) continue;
+      x = hx[i]; y = hy[i];
+      const k = 1 - la / 0.2;
+      a = ba[i] * 1.5 * k; s *= 1 + 0.9 * k;                                                          // 落位微闪
+    }
+    if (a <= 0.02) continue;
+    ctx.fillStyle = cols[i]; ctx.globalAlpha = Math.min(1, a);
+    ctx.fillRect(x - s * .25, y - s * .25, s, s);
+    if (p > 0.78) {                                         // 汇聚期辉光
+      ctx.globalAlpha = Math.min(1, a * 0.3);
+      ctx.fillRect(x - s, y - s, s * 2.5, s * 2.5);
+    }
+  }
+  ctx.restore(); ctx.globalAlpha = 1;
+}
+
+/* ---------------- 涟漪 / 闪光 / 环境尘埃 ---------------- */
+let ripples = [], flashes = [];
+function drawRipplesFx() {
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  ripples = ripples.filter(r => nowT - r.t0 < 0.6);
+  for (const r of ripples) {
+    const p = (nowT - r.t0) / 0.6;
+    ctx.strokeStyle = 'rgba(255,255,255,' + (0.35 * (1 - p)).toFixed(3) + ')';
+    ctx.lineWidth = 2 * (1 - p) + 0.4;
+    ctx.beginPath(); ctx.arc(r.x, r.y, easeOutQuad(p) * 190, 0, TAU); ctx.stroke();
+  }
+  flashes = flashes.filter(f => nowT - f.t0 < 0.45);
+  for (const f of flashes) {
+    const p = (nowT - f.t0) / 0.45;
+    const rr = f.r * (0.5 + p * 0.7);
+    const rg = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, rr);
+    rg.addColorStop(0, 'rgba(190,210,255,' + (0.34 * (1 - p)).toFixed(3) + ')');
+    rg.addColorStop(1, 'rgba(190,210,255,0)');
+    ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(f.x, f.y, rr, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+let dust = [];
+function initDust() {
+  dust = [];
+  for (let i = 0; i < 170; i++) dust.push({
+    x: Math.random() * W, y: Math.random() * H,
+    vy: -(2 + Math.random() * 9), ph: Math.random() * TAU,
+    sp: 0.3 + Math.random() * 1.1, s: 0.6 + Math.random() * 1.5,
+    a: 0.04 + Math.random() * 0.15, warm: Math.random() < 0.35,
+  });
+}
+function drawDust(dt) {
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (const d of dust) {
+    d.y += d.vy * dt; d.x += Math.sin(nowT * 0.4 + d.ph) * d.sp * dt * 8;
+    if (d.y < -6) { d.y = H + 6; d.x = Math.random() * W; }
+    ctx.globalAlpha = d.a * (0.6 + 0.4 * Math.sin(nowT * 1.6 + d.ph * 7));
+    ctx.fillStyle = d.warm ? '#ffd9a8' : '#bcd0ff';
+    ctx.fillRect(d.x, d.y, d.s, d.s);
+  }
+  ctx.restore(); ctx.globalAlpha = 1;
+}
+
+/* ---------------- 状态机 & 输入 ---------------- */
+let mode = 'solid';            // solid | dispersing | dispersed | reforming
+let animT0 = 0;
+function setHint() {
+  if (mode === 'solid')
+    hintEl.innerHTML = sampleCount > 0
+      ? '轻点窗口 · 化作 <span class="n">' + sampleCount.toLocaleString() + '</span> 粒光尘'
+      : '轻点窗口 · 化作万千粒子';
+  else if (mode === 'dispersed')
+    hintEl.innerHTML = '窗口已消散 · 轻点任意处 · 粒子汇聚重铸';
+  else hintEl.textContent = '';
+}
+function hitCard(x, y) { return x >= cardX && x <= cardX + CW && y >= cardY - 10 && y <= cardY + CH + 10; }
+function onPress(x, y) {
+  if (mode === 'solid') startDisperse(x, y, false);
+  else if (mode === 'dispersed') startReform(false);
+  else if (mode === 'dispersing') startReform(true);      // 中途反向：从当前位置收束
+  else if (mode === 'reforming') startDisperse(x, y, true);
+}
+canvas.addEventListener('pointerdown', e => onPress(e.clientX, e.clientY));
+window.addEventListener('pointermove', e => {
+  mouseX = e.clientX; mouseY = e.clientY;
+  canvas.style.cursor = (mode === 'solid' && hitCard(mouseX, mouseY)) || mode === 'dispersed' ? 'pointer' : 'default';
+});
+
+/* ---------------- 主渲染循环 ---------------- */
+function drawCard(blurPx, alpha, eraseR) {
+  if (alpha <= 0) return;
+  renderLayer(eraseR, blurPx);
+  const yy = cardY + bobY;
+  /* 投影 */
+  ctx.save();
+  ctx.translate(cardX + CW / 2, yy + CH / 2 + 26); ctx.scale(1, 0.42);
+  const sg = ctx.createRadialGradient(0, 0, 0, 0, 0, CW * 0.72);
+  sg.addColorStop(0, 'rgba(0,0,0,' + (0.4 * Math.min(1, alpha)).toFixed(3) + ')');
+  sg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(0, 0, CW * 0.72, 0, TAU); ctx.fill();
+  ctx.restore();
+  /* 合成层（可带 blur-in） */
+  ctx.save(); ctx.globalAlpha = Math.min(1, alpha);
+  if (blurPx > 0.4 && supportsFilter) ctx.filter = 'blur(' + blurPx + 'px)';
+  ctx.drawImage(layerCv, cardX - 2, yy - 2, CW + 4, CH + 4);
+  ctx.restore();
+  ctx.filter = 'none';
+}
+
+let supportsFilter = true;
+let lastTS = 0;
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (!lastTS) lastTS = ts;
+  const dt = Math.min(0.05, (ts - lastTS) / 1000); lastTS = ts;
+  nowT = ts / 1000;
+  bobY = Math.sin(nowT * 0.9) * 2.4;
+
+  drawBackground(dt);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(bgCanvas, 0, 0, W, H);
+
+  /* 暗角 */
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .35, W / 2, H / 2, Math.max(W, H) * .75);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.48)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+
+  drawDust(dt);
+
+  if (mode === 'solid') {
+    drawCard(0, 1, 0);
+  } else if (mode === 'dispersing') {
+    const T = nowT - animT0;
+    updateDisperse(dt);
+    const waveR = easeOutQuad(clamp01(T / 0.7)) * (Math.hypot(CW, CH) + 90);
+    const fade = 1 - clamp01((T - 0.38) / 0.55) * 0.92;
+    drawCard(0, fade, waveR);
+    drawDisperseParticles();
+  } else if (mode === 'reforming') {
+    const T = nowT - animT0;
+    updateReform();
+    const ma = clamp01((T - 0.45) / 0.7);                 // 卡片 blur-in 重铸
+    drawCard(Math.pow(1 - ma, 1.6) * 15, Math.max(0, ma * ma * 1.02 - ma * 0.02), 0);
+    drawReformParticles();
+  }
+  /* dispersed：只留尘埃与提示 */
+  drawRipplesFx();
+}
+
+/* ---------------- 初始化 / 自适应 ---------------- */
+function rebuild() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  bgCanvas.width = Math.ceil(W / BG_SCALE); bgCanvas.height = Math.ceil(H / BG_SCALE);
+  CW = Math.min(430, W - 40);
+  CH = Math.min(306, H - 120);
+  CR = Math.min(26, CW * 0.07);
+  cardX = Math.round((W - CW) / 2); cardY = Math.round((H - CH) / 2) - 6;
+  const L = makeCanvas(CW, CH); layerCv = L.c; layerCtx = L.x;
+  drawContent();
+  initDust();
+  mode = 'solid'; setHint();
+}
+try { ctx.filter = 'blur(2px)'; supportsFilter = ctx.filter !== 'none'; ctx.filter = 'none'; }
+catch (e) { supportsFilter = false; }
+
+initBlobs();
+rebuild();
+window.addEventListener('resize', rebuild);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
