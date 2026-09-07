@@ -15,8 +15,8 @@ android {
         applicationId = "com.example.DSH_Mobile"
         minSdk = 30
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.0.4-glass-particle"
+        versionCode = 7
+        versionName = "1.0.5-particle"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
