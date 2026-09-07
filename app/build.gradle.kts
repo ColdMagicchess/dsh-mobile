@@ -75,7 +75,6 @@ dependencies {
     implementation(libs.markwon.ext.latex)
     implementation(libs.markwon.ext.tables)
     implementation(libs.datastore.preferences)
-    implementation(libs.haze) // 毛玻璃：真实背景模糊（RenderEffect/RenderScript 双路径）
 
     debugImplementation(libs.compose.ui.tooling)
 

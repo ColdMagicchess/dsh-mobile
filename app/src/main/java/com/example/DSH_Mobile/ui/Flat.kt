@@ -212,7 +212,7 @@ fun FlatSegmented(
                     ambientColor = Color(0x140D0C22), spotColor = Color(0x170D0C22),
                 )
                 .clip(pill)
-                .glass(pill),
+                .background(Flat.White),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
             options.forEachIndexed { index, label ->
@@ -279,6 +279,11 @@ fun FlatButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    val bg by animateColorAsState(
+        if (enabled) Flat.Accent else Flat.Fill,
+        tween(200),
+        label = "btn-bg",
+    )
     val scale by animateFloatAsState(
         if (pressed) 0.985f else 1f,
         spring(dampingRatio = 0.6f, stiffness = 800f),
@@ -290,9 +295,7 @@ fun FlatButton(
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .glowRing(pressed && enabled)
             .height(48.dp)
-            .clip(Flat.Shape)
-            // 毛玻璃（白 25%）；禁用态保持原灰填充以区分可操作性
-            .then(if (enabled) Modifier.glass(Flat.Shape) else Modifier.background(Flat.Fill, Flat.Shape))
+            .background(bg, Flat.Shape)
             .clickable(
                 enabled = enabled,
                 interactionSource = interaction,

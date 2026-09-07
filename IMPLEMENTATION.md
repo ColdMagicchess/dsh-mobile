@@ -13,8 +13,7 @@
 | Markdown | Markwon core + ext-latex（JLaTeXMath Android 版） |
 | LaTeX | `$...$` / `$$...$$` 由 Markwon LatexPlugin 在 TextView 内渲染（F7）；行内公式居中与超宽缩放见 CenteredInlineLatexSpan，点按全屏查看 |
 | 代码高亮 | `ui/CodeHighlight.kt`：自实现 Markwon `SyntaxHighlight` 接口（29 种语言规则表 + generic 回退，`none` 不着色），语言感知正则分词 + LRU(256) 缓存；**不引入 prism4j/prism4j-bundler**（理由见 §7.3） |
-| 毛玻璃 | Haze 1.6.10（`ui/Glass.kt`）：API31+ RenderEffect / API30 RenderScript 双路径背景模糊；统一质感 = 白 25% 着色 + 发丝描边 + 顶部内高光；采不到背景的独立窗口（Popup/Dialog）退化为纯着色同视觉 |
-| 粒子转场 | `ui/DrawerParticles.kt`（DrawerFx）：抽屉面板 `GraphicsLayer.record` 录制 → `toImageBitmap` 位图采样（~1.07 万粒子，网格步长自适应）→ Canvas 参数化动画。**弹出=面板整体聚合**（0.16s 快速渐显，清晰像素不马赛克）+ 粒子自左飞入按 x 波次掠过融入原位；**收起=3 个随机种子点 DST_OUT 侵蚀洞**向外扩散，洞缘粒子向左飘散；位图拷贝/像素采样挪 `Dispatchers.Default` 防主线程卡顿；支持中途反向（面板退场、粒子快照位置续飞） |
+| 粒子转场 | `ui/DrawerParticles.kt`（DrawerFx）：抽屉面板 `GraphicsLayer.record` 录制 → `toImageBitmap` 位图采样（~8 千粒子，网格步长自适应）→ Canvas 参数化动画。**弹出=显影波左→右 + 粒子自左飞入融入**（0.72s）+ 落位段位图淡出交棒真实抽屉（450ms）；**收起=3 个随机种子点 DST_OUT 侵蚀洞**匀速外扩（0.5s），洞缘粒子向左飘散（全程 1.05s）；位图拷贝/像素采样挪 `Dispatchers.Default` 防主线程卡顿；支持中途反向（面板退场、粒子快照位置续飞） |
 | Compose BOM | 2025.09.01（Compose 1.9.2 / Material3 1.4.0）——GraphicsLayer 录制/读回需 ≥1.8；material3 1.4 起不再传递依赖 material-icons-core，已显式声明（BOM 钉 1.7.8） |
 | 存储 | DataStore + AndroidKeyStore AES-256/GCM 加密配对 cookie |
 | 图片 | Photo Picker（PickMultipleVisualMedia）→ 校验 mediaType/大小 → base64（无前缀）→ session/prompt content |
@@ -106,7 +105,6 @@ app/src/main/java/com/example/DSH_Mobile/
     ├── MarkdownText.kt        # Markwon+LaTeX(F7) + 打字机(F5: 45ms, step=max(1,min(9,ceil(remain/12))))
     │                          #   + 行内公式居中/超宽缩放 + 点按公式全屏查看器 + normalizeMath 宏清洗
     ├── CodeHighlight.kt       # 代码块语法高亮：SimpleSyntaxHighlight + CodeHighlightPlugin（见 §7.3）
-    ├── Glass.kt               # 毛玻璃统一质感层（白 25% + 描边 + 高光，可选 Haze 真模糊）
     └── DrawerParticles.kt     # 抽屉粒子汇聚/消散引擎（DrawerFx）
 app/src/main/java/io/noties/markwon/ext/latex/CenteredInlineLatexSpan.kt
                                # 同包继承包私有上游类：行内公式视觉中心对齐 + 按可用宽等比缩小
@@ -146,7 +144,6 @@ JDK 17 + Android SDK（local.properties 指向）。输出：`app/build/outputs/
 - ✅ F14 长消息折叠（截断正文，按钮在正文之外）
 - ✅ F15 智能体预设切换（插话模式旁新增预设按钮，点击展开圆形矩阵弹层；模型/工作区菜单改圆角矩形。名单走核心 `agentPresets/list`；0.3.12 起两通道等价，已有会话经 `agentPresets/select` 切换（会话开始后宿主拒绝：agent-preset-locked）。草稿态记住选择、首发消息随 `session/create` 的 `agentPreset` 下发）
 - ✅ 代码块语法高亮（`ui/CodeHighlight.kt`：`SimpleSyntaxHighlight` 实现 Markwon `SyntaxHighlight` 接口，29 种语言规则表（kotlin/java/python/js/ts/c/cpp/csharp/go/rust/sql/bash/yaml/toml/json/properties/ini/makefile/dockerfile/perl/ruby/swift/dart/php/powershell/r/css/html/xml）+ generic 回退；`CodeHighlightPlugin` 注册进 `buildMarkwon`；配色针对浅色聊天面调校）
-- ✅ 全局毛玻璃质感（所有按钮/胶囊/抽屉：白 25% + Haze 真模糊或退化着色，见 Glass.kt；原白字按钮改墨色保证可读）
 - ✅ 抽屉粒子转场（ChatScreen 状态机 DrawerPhase：Closed→录制采样→Converging→Open→录制采样→Dispersing；右滑/按钮/遮罩统一走 reqOpen/reqClose；录制失败自动回退瞬时开合）
 - ⏳ 待办：历史分页加载更早消息（session/page）、workspace/follow 工作区分组、附件取回（session/attachment 渲染历史图片）、$events 流驱动会话列表实时刷新、消息重发/编辑队列（updateQueue）、深链/快捷入口。
 

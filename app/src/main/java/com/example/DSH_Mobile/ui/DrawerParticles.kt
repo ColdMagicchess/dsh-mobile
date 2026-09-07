@@ -37,13 +37,13 @@ internal class DrawerFx {
     var step = 8f; private set
     var wPx = 0; private set
     var hPx = 0; private set
-    val tConverge = 1.0f
-    val tDisperse = 1.6f
+    val tConverge = 0.72f
+    val tDisperse = 1.05f
     /** 收起：三点侵蚀波扫过全卡的时间（线性匀速，洞缘所到之处才释放粒子） */
-    private val wave = 0.8f
+    private val wave = 0.5f
     /** 弹出：显影波参数——前沿从左扫到右，严格跟随粒子落位波 */
-    private val revealStart = 0.26f
-    private val revealDur = 0.52f
+    private val revealStart = 0.18f
+    private val revealDur = 0.36f
     private val revealFeather = 110f
 
     /** 面板清晰位图（软件 ARGB_8888，直接 drawBitmap） */
@@ -51,7 +51,7 @@ internal class DrawerFx {
     /** 0=面板退场（反向打断） 1=整体渐显（弹出） 2=DST_OUT 三点侵蚀（收起） */
     var panelMode = 0; private set
 
-    private companion object { const val CAP = 26000; const val TARGET = 24000 }
+    private companion object { const val CAP = 10000; const val TARGET = 8000 }
 
     private val hx = FloatArray(CAP); private val hy = FloatArray(CAP)
     private val col = IntArray(CAP)
@@ -69,7 +69,7 @@ internal class DrawerFx {
     fun build(bmp: Bitmap): Boolean {
         val w = bmp.width; val h = bmp.height
         if (w <= 0 || h <= 0) return false
-        step = maxOf(5f, ceil(sqrt((w * h).toDouble() / TARGET)).toFloat())
+        step = maxOf(7f, ceil(sqrt((w * h).toDouble() / TARGET)).toFloat())
         val si = step.toInt().coerceAtLeast(1)
         val pixels = IntArray(w * h)
         bmp.getPixels(pixels, 0, w, 0, 0, w, h)
@@ -102,7 +102,7 @@ internal class DrawerFx {
         return true
     }
 
-    fun release() { panelBmp = null; panelMode = 0; settleP = 0f; anchors = null }
+    fun release() { panelBmp = null; panelMode = 0; settleP = 0f }
 
     private fun nearestSeedDist(x: Float, y: Float): Float {
         var m = Float.MAX_VALUE
@@ -130,8 +130,8 @@ internal class DrawerFx {
                 sx[i] = -(40f + rn[i] * 260f)
                 sy[i] = (rn[i] - 0.5f) * 90f
                 // 落位时刻 = dl+du ≈ (x/w)*0.30 + [0.34..0.46]，显影波在其后 ~0.02s 覆盖
-                dl[i] = (hx[i] / wPx) * 0.30f + rn[i] * 0.06f
-                du[i] = 0.34f + rn[i] * 0.12f
+                dl[i] = (hx[i] / wPx) * 0.22f + rn[i] * 0.05f
+                du[i] = 0.26f + rn[i] * 0.10f
             }
         }
     }
@@ -148,8 +148,8 @@ internal class DrawerFx {
                 ox[i] = 0f; oy[i] = 0f
                 dl[i] = seedDelay(i)
             }
-            du[i] = 0.55f + rn[i] * 0.25f
-            fl[i] = 320f + rn[i] * 520f + (wPx - hx[i]) * 0.35f
+            du[i] = 0.40f + rn[i] * 0.18f
+            fl[i] = 360f + rn[i] * 560f + (wPx - hx[i]) * 0.35f
         }
     }
 
@@ -174,13 +174,9 @@ internal class DrawerFx {
      * 真实抽屉在位图底下完成首绘——所有切换开销被动画吸收，不再"顿"。
      */
     var settleP = 0f
-    /** 按钮投影圆心锚点 [x0,y0,x1,y1,...]（抽屉局部 px），由 ChatScreen 计算注入 */
-    var anchors: FloatArray? = null
-    private val haloR = 118f
 
     /** 复用 Paint，避免逐帧分配 */
     private val fadePaint = Paint().apply { isFilterBitmap = true }
-    private val haloPaint = Paint()
     private val edgePaint = Paint()
     private val wipePaint = Paint().apply {
         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
@@ -211,18 +207,8 @@ internal class DrawerFx {
                 if (sp > 0f) {
                     // 落位段：位图原样保留并淡出交棒，按钮投影同步渐显到位
                     drawEdgeShadow(canvas, 1f)
-                    anchors?.let { arr ->
-                        haloPaint.alpha = (sp * 255f).toInt()
-                        var k = 0
-                        while (k + 1 < arr.size) {
-                            haloPaint.shader = RadialGradient(
-                                arr[k], arr[k + 1], haloR,
-                                0x24000000.toInt(), 0x00000000, Shader.TileMode.CLAMP,
-                            )
-                            canvas.drawCircle(arr[k], arr[k + 1], haloR, haloPaint)
-                            k += 2
-                        }
-                    }
+                    // 不再画按钮假阴影光斑：位图(无阴影)→真实抽屉(有阴影)的
+                    // 交叉淡化本身就是阴影渐显动画，光斑反而糊成怪块
                     fadePaint.alpha = ((1f - sp) * 255f).toInt()
                     canvas.drawBitmap(bmp, 0f, 0f, fadePaint)
                     return@run

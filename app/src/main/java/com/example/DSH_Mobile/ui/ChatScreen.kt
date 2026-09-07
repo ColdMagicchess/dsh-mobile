@@ -34,8 +34,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -114,9 +112,6 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.asAndroidBitmap
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
-import dev.chrisbanes.haze.rememberHazeState
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -211,7 +206,6 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
         }
     }
 
-    val haze = rememberHazeState()   // 聊天内容作为毛玻璃的背景源
 
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(error) {
@@ -256,22 +250,13 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
         animEpoch++
     }
 
-    // 落位段：300ms 内 settleP 0→1（fx 绘制层读取），锚点=抽屉头部两个圆钮
-    val settleDens = LocalDensity.current
-    val settleInsets = WindowInsets.statusBars   // 扩展属性需组合上下文，提前取
+    // 落位段：SETTLE_MS 内 settleP 0→1（fx 绘制层读取）
     LaunchedEffect(settleEpoch) {
         if (settleEpoch == 0 || !settleActive) return@LaunchedEffect
-        val sbPx = settleInsets.getBottom(settleDens).toFloat()
-        fx.anchors = with(settleDens) {
-            floatArrayOf(
-                fx.wPx - 40.dp.toPx(), sbPx + 36.dp.toPx(),   // 收起 ×
-                fx.wPx - 94.dp.toPx(), sbPx + 36.dp.toPx(),   // 新建 +
-            )
-        }
         val start = withFrameMillis { it }
         var u = 0f
         while (u < 1f && settleActive) {
-            u = (withFrameMillis { it } - start) / 300f
+            u = (withFrameMillis { it } - start) / SETTLE_MS
             fx.settleP = u.coerceIn(0f, 1f)
             // 必须携带变化写 animT：写同值不触发 Canvas 重绘，
             // 落位淡出就整段没播（位图原地停留后瞬间消失=卡顿真因）
@@ -338,7 +323,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
 
             // ---------- 聊天主体 ----------
             Surface(
-                Modifier.fillMaxSize().hazeSource(haze),
+                Modifier.fillMaxSize(),
                 color = Flat.White,
                 contentColor = Flat.Ink,
             ) {
@@ -385,12 +370,12 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                FloatCircle(onClick = { reqOpen() }, haze = haze) {
+                FloatCircle(onClick = { reqOpen() }) {
                     Icon(MenuLines, contentDescription = "更多", tint = Flat.Ink, modifier = Modifier.size(20.dp))
                 }
                 Box {
                     var modelMenu by remember { mutableStateOf(false) }
-                    FloatPill(onClick = { vm.loadCatalog(); modelMenu = true }, haze = haze) {
+                    FloatPill(onClick = { vm.loadCatalog(); modelMenu = true }) {
                         Text(
                             modelLabel ?: "选择模型",
                             fontSize = 13.sp,
@@ -462,7 +447,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                 }
                 Box {
                     var wsMenu by remember { mutableStateOf(false) }
-                    FloatPill(onClick = { wsMenu = true }, haze = haze) {
+                    FloatPill(onClick = { wsMenu = true }) {
                         Text(
                             wsLabel,
                             fontSize = 13.sp,
@@ -573,7 +558,7 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                     }
                     .shadow(16.dp, drawerShape, clip = false)
                     .clip(drawerShape)
-                    .glass(drawerShape, haze),
+                    .background(Flat.White),
             ) {
                 // Open/Converging/录制帧组合内容：Converging 期间预热布局，
                 // 收束完成切 Open 不再出现整树重组的顿帧
@@ -628,7 +613,6 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
 private fun FloatCircle(
     onClick: () -> Unit,
     elevation: androidx.compose.ui.unit.Dp = 10.dp,
-    haze: HazeState? = null,
     content: @Composable () -> Unit,
 ) {
     Box(
@@ -636,7 +620,7 @@ private fun FloatCircle(
             .size(44.dp)
             .shadow(elevation, CircleShape, clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x6B000000))
             .clip(CircleShape)
-            .glass(CircleShape, haze)
+            .background(Flat.White)
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
         content = { content() },
@@ -644,13 +628,13 @@ private fun FloatCircle(
 }
 
 @Composable
-private fun FloatPill(onClick: () -> Unit, haze: HazeState? = null, content: @Composable () -> Unit) {
+private fun FloatPill(onClick: () -> Unit, content: @Composable () -> Unit) {
     Row(
         Modifier
             .height(44.dp)
             .shadow(10.dp, RoundedCornerShape(22.dp), clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x6B000000))
             .clip(RoundedCornerShape(22.dp))
-            .glass(RoundedCornerShape(22.dp), haze)
+            .background(Flat.White)
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
             .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -659,12 +643,12 @@ private fun FloatPill(onClick: () -> Unit, haze: HazeState? = null, content: @Co
 }
 
 @Composable
-private fun MiniPill(text: String, onClick: () -> Unit, icon: ImageVector? = null, haze: HazeState? = null) {
+private fun MiniPill(text: String, onClick: () -> Unit, icon: ImageVector? = null) {
     Row(
         Modifier
             .shadow(8.dp, RoundedCornerShape(16.dp), clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x66000000))
             .clip(RoundedCornerShape(16.dp))
-            .glass(RoundedCornerShape(16.dp), haze)
+            .background(Flat.White)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -999,7 +983,7 @@ private fun ArchiveDialog(target: SessionSummary, onDismiss: () -> Unit, onConfi
                         Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(10.dp))
-                            .glass(RoundedCornerShape(10.dp))
+                            .background(Flat.Fill)
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
@@ -1014,7 +998,7 @@ private fun ArchiveDialog(target: SessionSummary, onDismiss: () -> Unit, onConfi
                         enabled = true,
                         modifier = Modifier.weight(1f),
                     ) {
-                        Text("归 档", fontSize = 14.sp, color = Flat.Ink)
+                        Text("归 档", fontSize = 14.sp, color = Flat.White)
                     }
                 }
             }
@@ -1128,7 +1112,7 @@ private fun InputBar(
                             .size(44.dp)
                             .shadow(10.dp, CircleShape, clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x6B000000))
                             .clip(CircleShape)
-                            .then(if (enabled) Modifier.glass(CircleShape) else Modifier.background(Flat.Fill, CircleShape))
+                            .background(if (enabled) Flat.Accent else Flat.Fill)
                             .clickable(
                                 enabled = enabled,
                                 interactionSource = remember { MutableInteractionSource() },
@@ -1143,7 +1127,7 @@ private fun InputBar(
                             Icon(
                                 Icons.Filled.Send,
                                 contentDescription = "发送",
-                                tint = if (enabled) Flat.Ink else Flat.Muted,
+                                tint = if (enabled) Color.White else Flat.Muted,
                                 modifier = Modifier.size(18.dp),
                             )
                         }
@@ -1336,7 +1320,7 @@ private fun DrawerSessionRow(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .then(if (selected) Modifier.glass(RoundedCornerShape(8.dp)) else Modifier)
+            .background(if (selected) Flat.Fill else Color.Transparent)
             .combinedClickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -1359,9 +1343,7 @@ private fun DrawerSessionRow(
             s.title?.takeIf { it.isNotBlank() }
                 ?: if (s.blank) "(新会话)" else "(未命名)",
             fontSize = 14.sp,
-            // 玻璃选中态上，天蓝细字在模糊背景里可读性差：改墨色加粗表达选中
-            color = Flat.Ink,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) Flat.Accent else Flat.Ink,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
@@ -1379,6 +1361,9 @@ private fun DrawerSessionRow(
 
 /** 抽屉粒子转场状态机。 */
 private enum class DrawerPhase { Closed, Converging, Open, Dispersing }
+
+/** 落位段时长（ms）：位图淡出/阴影渐显的交棒动画，调大更从容 */
+private const val SETTLE_MS = 450f
 
 private const val PRESET_GRID_COLUMNS = 3
 
@@ -1495,7 +1480,7 @@ private fun PresetCircle(row: AgentPresetRow, selected: Boolean, onClick: () -> 
                 .size(48.dp)
                 .shadow(8.dp, CircleShape, clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x66000000))
                 .clip(CircleShape)
-                .glass(CircleShape)
+                .background(if (selected) Flat.Accent else Flat.Fill)
                 .clickable(
                     enabled = !broken,
                     interactionSource = remember { MutableInteractionSource() },
@@ -1508,7 +1493,7 @@ private fun PresetCircle(row: AgentPresetRow, selected: Boolean, onClick: () -> 
                 Icon(
                     Icons.Filled.Check,
                     contentDescription = null,
-                    tint = Flat.Accent,
+                    tint = Color.White,
                     modifier = Modifier.size(22.dp),
                 )
             } else {
