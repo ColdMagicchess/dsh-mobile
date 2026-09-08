@@ -121,6 +121,7 @@ import com.example.DSH_Mobile.dsh.AgentPresetRow
 import com.example.DSH_Mobile.dsh.ImageRef
 import com.example.DSH_Mobile.dsh.ChatMessage
 import com.example.DSH_Mobile.dsh.ModelGroup
+import com.example.DSH_Mobile.dsh.ModelReasoningOption
 import com.example.DSH_Mobile.dsh.Role
 import com.example.DSH_Mobile.dsh.SessionSummary
 import com.example.DSH_Mobile.dsh.ToolCallInfo
@@ -142,6 +143,8 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
         session?.let { vm.open(it) } ?: vm.newDraft(appState.defaultCwd, appState.defaultModel)
     }
     LaunchedEffect(Unit) { vm.onSessionCreated = { appVm.refreshSessions() } }
+    // 思考强度按钮要靠模型目录判断当前模型是否支持，进聊天页静默预热一次
+    LaunchedEffect(Unit) { vm.loadCatalog(quiet = true) }
     LaunchedEffect(appState.sessions, appState.defaultCwd) {
         vm.syncWorkspaces(appState.sessions, appState.defaultCwd)
     }
@@ -296,6 +299,27 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
     }
 
     val modelLabel = (liveModel ?: session?.model ?: draftModel)?.model
+
+    // ---------- 思考强度（reasoning effort）状态 ----------
+    val effortSel = liveModel ?: session?.model ?: draftModel
+    // 思考强度档位精确到 (provider, model) 路由：只做精确匹配，绝不回退到
+    // 其他模型 —— 否则会展示别的模型的档位，选中后发出宿主拒绝的无效请求。
+    // 匹配不到（含该模型 reasoning 缺失）一律按不支持处理。
+    val modelEntry = remember(catalog, effortSel?.provider, effortSel?.model) {
+        val p = effortSel?.provider
+        val m = effortSel?.model?.takeIf { it.isNotBlank() }
+        if (p == null || m == null) null else
+            catalog?.let { cats ->
+                cats.firstOrNull { it.id == p }?.models?.firstOrNull { it.id == m }
+                    ?: cats.asSequence().flatMap { g -> g.models.asSequence() }.firstOrNull { it.id == m }
+            }
+    }
+    // null=目录未加载（状态未知）；empty=当前模型不支持思考强度；非空=该模型专属档位
+    val effortOptions: List<ModelReasoningOption>? = when {
+        catalog == null -> null
+        else -> modelEntry?.efforts ?: emptyList()
+    }
+    val currentEffort = effortSel?.reasoningEffort ?: modelEntry?.defaultEffort
     val wsLabel = workspaces.firstOrNull { it.path == selectedWs }?.label
         ?: selectedWs?.trimEnd('\\', '/')?.split('\\', '/')?.lastOrNull { it.isNotBlank() }
         ?: "工作区"
@@ -357,6 +381,10 @@ fun ChatScreen(appState: AppUiState, appVm: AppViewModel, vm: ChatViewModel) {
                     currentPresetId = presetLabel,
                     onOpenPresets = { vm.loadPresets() },
                     onPickPreset = { vm.pickPreset(it) },
+                    effortOptions = effortOptions,
+                    currentEffort = currentEffort,
+                    onOpenEffortMenu = { vm.loadCatalog(quiet = true) },
+                    onPickEffort = { vm.pickEffort(it) },
                 )
             }
             }
@@ -643,13 +671,14 @@ private fun FloatPill(onClick: () -> Unit, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun MiniPill(text: String, onClick: () -> Unit, icon: ImageVector? = null) {
+private fun MiniPill(text: String, onClick: () -> Unit, icon: ImageVector? = null, enabled: Boolean = true) {
     Row(
         Modifier
             .shadow(8.dp, RoundedCornerShape(16.dp), clip = false, ambientColor = Color(0x33000000), spotColor = Color(0x66000000))
             .clip(RoundedCornerShape(16.dp))
-            .background(Flat.White)
+            .background(if (enabled) Flat.White else Flat.Fill)
             .clickable(
+                enabled = enabled,
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onClick,
@@ -661,7 +690,7 @@ private fun MiniPill(text: String, onClick: () -> Unit, icon: ImageVector? = nul
             Icon(icon, contentDescription = null, tint = Flat.Muted, modifier = Modifier.size(13.dp))
             Spacer(Modifier.width(4.dp))
         }
-        Text(text, fontSize = 11.sp, color = Flat.Label)
+        Text(text, fontSize = 11.sp, color = if (enabled) Flat.Label else Flat.Muted)
     }
 }
 
@@ -1027,6 +1056,10 @@ private fun InputBar(
     currentPresetId: String?,
     onOpenPresets: () -> Unit,
     onPickPreset: (AgentPresetRow) -> Unit,
+    effortOptions: List<ModelReasoningOption>?,
+    currentEffort: String?,
+    onOpenEffortMenu: () -> Unit,
+    onPickEffort: (String) -> Unit,
 ) {
     Surface(color = Flat.White) {
         Column(
@@ -1162,6 +1195,72 @@ private fun InputBar(
                         onPick = onPickPreset,
                         onRetry = onOpenPresets,
                     )
+                }
+                // 思考强度：模型支持时显示当前档位并可下拉切换；不支持置灰显示 unsupported
+                Box {
+                    var effortMenu by remember { mutableStateOf(false) }
+                    val supported = effortOptions != null && effortOptions.isNotEmpty()
+                    // 目录加载完成且当前模型不支持时，自动收起刚打开的菜单
+                    LaunchedEffect(effortOptions) {
+                        if (effortMenu && effortOptions != null && effortOptions.isEmpty()) effortMenu = false
+                    }
+                    // 当前档位展示名：优先宿主给的 name，未设置则显示“默认”
+                    val currentLabel = currentEffort
+                        ?.let { c -> effortOptions?.firstOrNull { it.id == c }?.label }
+                        ?: "默认"
+                    MiniPill(
+                        text = when {
+                            effortOptions == null -> "思考强度…"
+                            !supported -> "思考强度 unsupported"
+                            else -> "思考强度:" + currentLabel
+                        },
+                        onClick = {
+                            onOpenEffortMenu()
+                            effortMenu = true
+                        },
+                        enabled = effortOptions == null || supported,
+                    )
+                    DropdownMenu(
+                        expanded = effortMenu,
+                        onDismissRequest = { effortMenu = false },
+                        containerColor = Flat.White,
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        if (effortOptions == null) {
+                            DropdownMenuItem(
+                                text = { Text("加载中…", fontSize = 13.sp, color = Flat.Muted) },
+                                onClick = {},
+                                enabled = false,
+                            )
+                        }
+                        effortOptions?.forEach { e ->
+                            DropdownMenuItem(
+                                // 展示名与描述都来自宿主目录（不同模型列表不同）
+                                text = {
+                                    Column {
+                                        Text(e.label, fontSize = 14.sp, color = Flat.Ink)
+                                        e.description?.let { d ->
+                                            Text(d, fontSize = 11.sp, color = Flat.Muted, maxLines = 2)
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    effortMenu = false
+                                    onPickEffort(e.id)
+                                },
+                                trailingIcon = {
+                                    if (e.id == currentEffort) {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            contentDescription = null,
+                                            tint = Flat.Accent,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }

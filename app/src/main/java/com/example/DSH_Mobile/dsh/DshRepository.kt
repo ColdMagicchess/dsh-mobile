@@ -146,8 +146,14 @@ class DshRepository(private val client: DshClient) {
             val models = go.arr("models").orEmpty().mapNotNull { m ->
                 val mo = m.asObj() ?: return@mapNotNull null
                 val mid = mo.str("id") ?: return@mapNotNull null
+                // 宿主 ModelReasoningEffort = {id, name, description?}；efforts 精确到单模型
                 val efforts = mo.obj("reasoning")?.arr("efforts").orEmpty().mapNotNull { e ->
-                    e.asObj()?.str("id") ?: e.asPrim()?.contentOrNull
+                    val eo = e.asObj()
+                    if (eo != null) {
+                        eo.str("id")?.let { ModelReasoningOption(it, eo.str("name"), eo.str("description")) }
+                    } else {
+                        e.asPrim()?.contentOrNull?.let { ModelReasoningOption(it) }
+                    }
                 }
                 ModelEntry(mid, mo.str("name") ?: "", efforts, mo.obj("reasoning")?.str("defaultEffort"))
             }

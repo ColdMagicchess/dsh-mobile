@@ -66,9 +66,22 @@ data class ChatMessage(
 
 data class ModelGroup(val id: String, val name: String, val models: List<ModelEntry>)
 
+/**
+ * 单个模型路由的思考强度档位（宿主 ModelReasoningEffort：id + 展示名 + 可选描述）。
+ * efforts 是精确到 (provider, model) 的能力，不同模型的档位列表不同。
+ */
+data class ModelReasoningOption(
+    val id: String,
+    val name: String? = null,
+    val description: String? = null,
+) {
+    val label: String
+        get() = name?.takeIf { it.isNotBlank() } ?: id
+}
+
 data class ModelEntry(
     val id: String,
     val name: String,
-    val efforts: List<String>,
+    val efforts: List<ModelReasoningOption>,
     val defaultEffort: String?,
 )

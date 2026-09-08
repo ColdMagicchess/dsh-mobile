@@ -275,12 +275,13 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    fun loadCatalog() {
+    /** quiet=true：失败不打扰用户（思考强度按钮后台预热目录时用）。 */
+    fun loadCatalog(quiet: Boolean = false) {
         viewModelScope.launch {
             try {
                 _catalog.value = repo.modelCatalog(_current.value?.sessionId)
             } catch (t: Throwable) {
-                _error.value = t.message ?: "获取模型列表失败"
+                if (!quiet) _error.value = t.message ?: "获取模型列表失败"
             }
         }
     }
@@ -346,6 +347,41 @@ class ChatViewModel : ViewModel() {
                 _catalog.value = null
             } catch (t: Throwable) {
                 _error.value = t.message ?: "切换模型失败"
+            }
+        }
+    }
+
+    /**
+     * 调整当前模型的思考强度（reasoning effort）。
+     * 草稿态：合入 pendingModel，建会话时随 session/selectModel 一起下发；
+     * 已有会话：直接 session/selectModel，宿主广播的 model 事件会把新的
+     * reasoningEffort 推回 liveModel，UI 自动跟随。
+     */
+    fun pickEffort(effort: String) {
+        if (effort.isBlank()) return
+        val s = _current.value
+        val sel = s?.let { store.model.value ?: it.model } ?: pendingModel ?: _draftModel.value
+        if (sel == null) return
+        // 防线：档位是精确到 (provider, model) 的能力。目录已加载时必须命中
+        // 当前模型的档位列表才下发，否则宿主会拒绝请求。
+        val entry = _catalog.value?.let { cats ->
+            cats.firstOrNull { it.id == sel.provider }?.models?.firstOrNull { it.id == sel.model }
+                ?: cats.asSequence().flatMap { g -> g.models.asSequence() }.firstOrNull { it.id == sel.model }
+        }
+        if (entry != null && entry.efforts.none { it.id == effort }) {
+            _error.value = "当前模型不支持思考强度 $effort"
+            return
+        }
+        if (s == null) {
+            pendingModel = sel.copy(reasoningEffort = effort)
+            _draftModel.value = pendingModel
+            return
+        }
+        viewModelScope.launch {
+            try {
+                repo.selectModel(s.sessionId, sel.provider, sel.model, effort)
+            } catch (t: Throwable) {
+                _error.value = t.message ?: "调整思考强度失败"
             }
         }
     }
